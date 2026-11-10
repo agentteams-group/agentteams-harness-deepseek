@@ -1,6 +1,9 @@
 ARG HIGRESS_REGISTRY=higress-registry.cn-hangzhou.cr.aliyuncs.com
+ARG AGENTTEAMS_CONTROLLER_IMAGE=higress-registry.cn-hangzhou.cr.aliyuncs.com/agentteams/agentteams-controller:v1.2.6
 
 FROM ${HIGRESS_REGISTRY}/higress/mc:20260216 AS mc
+
+FROM ${AGENTTEAMS_CONTROLLER_IMAGE} AS controller
 
 FROM node:24-bookworm-slim
 
@@ -22,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=mc /usr/bin/mc /usr/local/bin/mc.bin
 COPY --from=shared . /opt/agentteams/scripts/lib/
+COPY --from=controller /usr/local/bin/agt /usr/local/bin/agt
 
 COPY package.json /opt/agentteams/dsh/package.json
 # Keep rc.2's Cordis services at its tested source snapshot versions.
