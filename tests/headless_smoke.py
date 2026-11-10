@@ -54,6 +54,9 @@ class Model(BaseHTTPRequestHandler):
         pass
 
 
+for helper in ('install-worker-skill.sh', 'safe-extract-worker-skill.py', 'push-worker-skills.sh'):
+    assert Path('/opt/agentteams/agent/skills/worker-management/scripts', helper).is_file(), helper
+
 with tempfile.TemporaryDirectory() as temp:
     root = Path(temp)
     home = root / 'dsh'
