@@ -70,4 +70,10 @@ RUN chmod +x /opt/agentteams/scripts/lib/mc-wrapper.sh \
 
 WORKDIR /root/agentteams-fs/agents
 EXPOSE 8088
+COPY --from=controller \
+    /opt/agentteams/agent/skills/worker-management/scripts/install-worker-skill.sh \
+    /opt/agentteams/agent/skills/worker-management/scripts/safe-extract-worker-skill.py \
+    /opt/agentteams/agent/skills/worker-management/scripts/push-worker-skills.sh \
+    /opt/agentteams/agent/skills/worker-management/scripts/
+
 ENTRYPOINT ["/usr/bin/tini", "--", "/opt/agentteams/scripts/deepseek-harness-worker-entrypoint.sh"]
