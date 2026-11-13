@@ -1,6 +1,13 @@
 # agentteams-harness-deepseek
 
 DeepSeek Harness runtime integration for [AgentTeams](https://github.com/agentscope-ai/AgentTeams).
+
+Native approvals and `ask_user_question` use inline Dashboard cards. Approval
+decisions are bound to the original human, room and request; the native session's
+`approval/decided` event produces the final receipt. Question answers preserve
+question IDs, multiple selections and custom text. `DSH_PERMISSION_MODE` keeps
+its existing default; use `workspace-write` when testing interactive escalation.
+`make smoke` exercises the pinned approval and question services.
 Migrated from `deepseek-harness/` and `plugins/teamharness/adapters/deepseek-harness/`
 at AgentTeams commit `67c8e807c4d210537b753f8121710181825bdfac` (Apache-2.0).
 

@@ -18,6 +18,7 @@
     "prepare-skills.js",
     "probe.js",
     "runner.js",
+    "matrix-interactions.js",
     "turn.js",
     "cordis.patch.yml"
   ],
