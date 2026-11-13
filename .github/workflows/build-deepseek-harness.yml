@@ -79,6 +79,7 @@ jobs:
         run: |
           make build
           make smoke
+          make direct-control-smoke
 
       - name: Login to Registry
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'

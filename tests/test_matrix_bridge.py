@@ -497,10 +497,11 @@ Node.js v24.22.1
 
 
 class RoomSessionContinuationTest(unittest.TestCase):
-    @patch("matrix_bridge.subprocess.run")
+    @patch("matrix_bridge.subprocess.Popen")
     def test_each_turn_uses_current_projected_model_and_gateway(self, mocked_run):
+        mocked_run.return_value.pid = 99999999
         mocked_run.return_value.returncode = 0
-        mocked_run.return_value.stdout = "answer"
+        mocked_run.return_value.communicate.return_value = ("answer", "")
         with tempfile.TemporaryDirectory() as directory:
             runtime = Path(directory) / 'runtime.yaml'
             for explicit in ('', 'https://api.deepseek.com'):
@@ -528,11 +529,11 @@ class RoomSessionContinuationTest(unittest.TestCase):
             self.assertEqual(restored_session, first_session)
             self.assertTrue(restored_is_resume)
 
-    @patch("matrix_bridge.subprocess.run")
+    @patch("matrix_bridge.subprocess.Popen")
     def test_dsh_receives_room_session_and_resume_mode(self, mocked_run):
+        mocked_run.return_value.pid = 99999999
         mocked_run.return_value.returncode = 0
-        mocked_run.return_value.stdout = "continued answer\n"
-        mocked_run.return_value.stderr = ""
+        mocked_run.return_value.communicate.return_value = ("continued answer\n", "")
 
         answer = run_dsh(
             "what did I say before?",

@@ -10,7 +10,9 @@ import re
 import signal
 import subprocess
 import threading
+import time
 import urllib.error
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -365,6 +367,7 @@ def run_dsh(
     resume: bool,
     event_id: str,
     attempt: int,
+    poll_control=None,
 ) -> str:
     environment = os.environ.copy()
     runtime_path = environment.get("TEAMHARNESS_RUNTIME_CONFIG")
@@ -384,21 +387,101 @@ def run_dsh(
             "TEAMHARNESS_DSH_ATTEMPT": str(attempt),
         }
     )
-    completed = subprocess.run(
+    process = subprocess.Popen(
         ["agentteams-dsh", task],
         cwd=workspace,
         env=environment,
         text=True,
-        capture_output=True,
-        timeout=timeout_seconds,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
     )
-    answer = completed.stdout.strip()
-    if completed.returncode != 0:
-        detail = dsh_error_detail(completed.stderr, completed.returncode)
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        while True:
+            try:
+                stdout, stderr = process.communicate(timeout=0.5)
+                break
+            except subprocess.TimeoutExpired:
+                if poll_control and poll_control():
+                    raise InterruptedError("Direct conversation stopped")
+                if STOP.is_set():
+                    raise InterruptedError("Worker is shutting down")
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("DeepSeek Harness task timed out")
+    finally:
+        if process.poll() is None:
+            # Native DSH disposes its profile and persists the room session on
+            # SIGTERM. Reap the owned process group before acknowledging stop.
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.communicate(timeout=8)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.communicate()
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    answer = stdout.strip()
+    if process.returncode != 0:
+        detail = dsh_error_detail(stderr, process.returncode)
         raise RuntimeError(f"DeepSeek Harness task failed: {detail}")
     if not answer:
         raise RuntimeError("DeepSeek Harness returned an empty answer")
     return answer
+
+
+def direct_member(client, event, own_user_id, room_types, agent_user_ids):
+    if room_types.get(event["room_id"]) != "personal" or event["sender"] in agent_user_ids:
+        return False
+    try:
+        members = client.request("GET", "/_matrix/client/v3/rooms/" + urllib.parse.quote(event["room_id"], safe="") + "/joined_members")
+        return set(members.get("joined", {})) == {own_user_id, event["sender"]}
+    except Exception:
+        return False
+
+
+def execution_status(client, event, status, message_id=None):
+    return client.send_content(event["room_id"], {
+        "msgtype": "m.notice", "body": {
+            "running": "正在执行", "stopping": "正在停止", "stopped": "已停止",
+            "completed": "本轮已结束", "failed": "执行失败",
+        }[status],
+        "com.agentteams.execution": {"run_id": event["event_id"], "status": status,
+            "capabilities": ["stop", "steer"], **({"message_id": message_id} if message_id else {})},
+    }, f"{event['event_id']}:execution:{status}")
+
+
+def poll_direct_control(client, since, active, state, own_user_id, room_types, agent_user_ids, allowed_senders):
+    # Do not advance the durable cursor here: ordinary messages must still be
+    # ingested by the outer loop after this native process has exited.
+    payload = client.sync(since, 0)
+    client.fill_timeline_gaps(payload, since, room_types)
+    controls = []
+    for event in matrix_events(payload, room_types, own_user_id, agent_user_ids, allowed_senders):
+        control = event.get("execution_control")
+        if (isinstance(control, dict) and control.get("action") in {"stop", "steer"}
+                and control.get("agent_id") == own_user_id and control.get("run_id") == active["event_id"]
+                and event["room_id"] == active["room_id"] and event["sender"] == active["sender"]
+                and not state.is_completed(event["event_id"])
+                and direct_member(client, event, own_user_id, room_types, agent_user_ids)):
+            controls.append(event)
+    if not controls:
+        return False
+    inputs = state.data["events"][active["event_id"]].get("direct_inputs", [active["body"]])
+    supplements = []
+    for event in controls:
+        if event["execution_control"]["action"] == "steer":
+            supplements.append(event)
+            inputs = [*inputs, event["body"]]
+        state.mark_completed(event["event_id"], "")
+    if supplements:
+        pending = state.data["events"][supplements[-1]["event_id"]]
+        pending.update(status="queued", direct_inputs=inputs)
+    state.save()
+    execution_status(client, active, "stopping")
+    return True
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -489,14 +572,23 @@ def main() -> int:
             for event in matrix_events(payload, room_types, own_user_id, agent_user_ids, allowed_senders):
                 if state.is_completed(event["event_id"]):
                     continue
+                control = event.get("execution_control")
+                if control is not None and (not isinstance(control, dict) or control.get("action") != "steer" or control.get("agent_id") != own_user_id):
+                    state.mark_completed(event["event_id"], "")
+                    state.save()
+                    continue
                 session_id, resume = state.session_for(event["room_id"])
                 attempts = state.begin_event(event["event_id"], event["room_id"])
                 state.save()
                 push_runtime_state(worker_name, state_path)
+                direct = direct_member(client, event, own_user_id, room_types, agent_user_ids)
                 try:
                     cached_answer = state.answer_for(event["event_id"])
                     if cached_answer is None:
                         task = event["body"]
+                        inputs = state.data["events"][event["event_id"]].get("direct_inputs")
+                        if inputs:
+                            task = "Continue the original request using all supplementary information. Preserve conversation context and earlier results.\n\n" + "\n\n".join(inputs)
                         if allowed_senders is not None:
                             task = f"Current Matrix room: {event['room_id']}\nSender: {event['sender']}\n\n{task}"
                         if event["kind"] != "text":
@@ -507,6 +599,8 @@ def main() -> int:
                             state.mark_outbox_before(event["event_id"], outbox_before)
                             state.save()
                             push_runtime_state(worker_name, state_path)
+                        if direct:
+                            execution_status(client, event, "running")
                         answer = run_dsh(
                             task,
                             workspace,
@@ -515,6 +609,7 @@ def main() -> int:
                             resume=resume,
                             event_id=event["event_id"],
                             attempt=attempts,
+                            poll_control=(lambda: poll_direct_control(client, since, event, state, own_user_id, room_types, agent_user_ids, allowed_senders)) if direct else None,
                         )
                         sync_sessions(worker_name)
                         state.mark_session_ready(event["room_id"])
@@ -547,9 +642,21 @@ def main() -> int:
                         bool(source_agent),
                     )
                     state.mark_completed(event["event_id"], reply_event_id)
+                    if direct:
+                        execution_status(client, event, "completed", reply_event_id)
                     state.save()
                     push_runtime_state(worker_name, state_path)
+                except InterruptedError:
+                    sync_sessions(worker_name)
+                    state.mark_session_ready(event["room_id"])
+                    state.mark_completed(event["event_id"], "")
+                    state.save()
+                    push_runtime_state(worker_name, state_path)
+                    if direct and not STOP.is_set():
+                        execution_status(client, event, "stopped")
                 except Exception as error:
+                    if direct:
+                        execution_status(client, event, "failed")
                     state.mark_failure(event["event_id"], str(error))
                     state.save()
                     push_runtime_state(worker_name, state_path)

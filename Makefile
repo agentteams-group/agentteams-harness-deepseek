@@ -22,3 +22,7 @@ push:
 
 smoke:
 	docker run --rm --entrypoint python3 -v "$(CURDIR)/tests/headless_smoke.py:/tmp/headless_smoke.py:ro" $(IMAGE):$(VERSION) /tmp/headless_smoke.py
+
+direct-control-smoke:
+	docker run --rm --entrypoint python3 -v "$(CURDIR):/dm:ro" -e PYTHONPATH=/dm/scripts $(IMAGE):$(VERSION) /dm/tests/direct_control_smoke.py steer
+	docker run --rm --entrypoint python3 -v "$(CURDIR):/dm:ro" -e PYTHONPATH=/dm/scripts $(IMAGE):$(VERSION) /dm/tests/direct_control_smoke.py stop
