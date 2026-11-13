@@ -495,6 +495,8 @@ def main() -> int:
                 # blocked; stale controls must never start another model turn.
                 if re.sub(r"^(?:@\S+\s+)+", "", str(event.get("body", "")).strip()).startswith("/agentteams-approval "):
                     continue
+                if isinstance(event.get("answer"), dict) and event["answer"].get("confirmation_id"):
+                    continue
                 if state.is_completed(event["event_id"]):
                     continue
                 session_id, resume = state.session_for(event["room_id"])

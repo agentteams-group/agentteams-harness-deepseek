@@ -75,6 +75,8 @@ def matrix_events(
             }
             if content.get("com.agentteams.auto_source_mention") is True:
                 extracted["auto_source_mention"] = True
+            if isinstance(content.get("com.agentteams.answer"), dict):
+                extracted["answer"] = content["com.agentteams.answer"]
             if kind != "text":
                 mxc_url = str(content.get("url") or "").strip()
                 if not mxc_url.startswith("mxc://"):
