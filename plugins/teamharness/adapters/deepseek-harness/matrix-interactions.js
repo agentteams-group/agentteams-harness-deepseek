@@ -102,9 +102,14 @@ export class MatrixInteractions {
 export function installMatrixInteractions(ctx, options) {
   const transport = new MatrixInteractions(options)
   ctx.on('approval/request', (req, next) => {
-    const asked = req.agent.session.events.findLast(e => e.type === 'approval/asked'
-      && e.data.toolName === req.toolName && e.data.callId === req.callId)
-    return asked ? transport.approval(req, asked.data.id) : next()
+    const events = req.agent.session.events
+    const decided = new Set(events.filter(e => e.type === 'approval/decided').map(e => e.data.id))
+    const asked = events.filter(e => e.type === 'approval/asked' && !decided.has(e.data.id)
+      && !transport.approvals.has(e.data.id) && e.data.toolName === req.toolName
+      && e.data.callId === req.callId && e.data.reason === req.reason)
+    // The native answerer API omits its audit ID. Ambiguous requests without
+    // call IDs must fail closed rather than approving another concurrent call.
+    return asked.length === 1 ? transport.approval(req, asked[0].data.id) : next()
   })
   ctx.on('session/event', (_session, event) => {
     if (event.type === 'approval/decided') {
