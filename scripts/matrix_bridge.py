@@ -370,6 +370,7 @@ def run_dsh(
     poll_control=None,
     room_id: str = "",
     sender: str = "",
+    source_event_ids: list[str] | None = None,
 ) -> str:
     environment = os.environ.copy()
     runtime_path = environment.get("TEAMHARNESS_RUNTIME_CONFIG")
@@ -389,6 +390,7 @@ def run_dsh(
             "TEAMHARNESS_DSH_ATTEMPT": str(attempt),
             "TEAMHARNESS_MATRIX_ROOM_ID": room_id,
             "TEAMHARNESS_MATRIX_SENDER": sender,
+            "TEAMHARNESS_SESSION_SOURCE_EVENT_IDS": json.dumps(source_event_ids or [event_id]),
         }
     )
     process = subprocess.Popen(
@@ -474,15 +476,17 @@ def poll_direct_control(client, since, active, state, own_user_id, room_types, a
     if not controls:
         return False
     inputs = state.data["events"][active["event_id"]].get("direct_inputs", [active["body"]])
+    input_ids = state.data["events"][active["event_id"]].get("direct_input_ids", [active["event_id"]])
     supplements = []
     for event in controls:
         if event["execution_control"]["action"] == "steer":
             supplements.append(event)
             inputs = [*inputs, event["body"]]
+            input_ids = [*input_ids, event["event_id"]]
         state.mark_completed(event["event_id"], "")
     if supplements:
         pending = state.data["events"][supplements[-1]["event_id"]]
-        pending.update(status="queued", direct_inputs=inputs)
+        pending.update(status="queued", direct_inputs=inputs, direct_input_ids=input_ids)
     state.save()
     execution_status(client, active, "stopping")
     return True
@@ -622,6 +626,7 @@ def main() -> int:
                             poll_control=(lambda: poll_direct_control(client, since, event, state, own_user_id, room_types, agent_user_ids, allowed_senders)) if direct else None,
                             room_id=event["room_id"],
                             sender=event["sender"],
+                            source_event_ids=state.data["events"][event["event_id"]].get("direct_input_ids", [event["event_id"]]),
                         )
                         sync_sessions(worker_name)
                         state.mark_session_ready(event["room_id"])

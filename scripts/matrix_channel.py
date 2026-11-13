@@ -13,6 +13,11 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+try:
+    from agentteams_receipts import capture_audience
+except ModuleNotFoundError:
+    capture_audience = None
+
 
 def matrix_events(
     payload: dict[str, Any],
@@ -270,6 +275,8 @@ class MatrixClient:
         raise RuntimeError(f"Matrix media upload failed: {last_error}")
 
     def send_content(self, room_id: str, content: dict[str, Any], transaction_key: str) -> str:
+        if capture_audience:
+            content = capture_audience(self.request, room_id, content)
         room = urllib.parse.quote(room_id, safe="")
         txn = matrix_transaction_id(transaction_key)
         result = self.request("PUT", f"/_matrix/client/v3/rooms/{room}/send/m.room.message/{txn}", content)
