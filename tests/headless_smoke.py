@@ -72,8 +72,8 @@ with tempfile.TemporaryDirectory() as temp:
     shutil.copytree('/opt/agentteams/dsh-template', home)
     if override := os.getenv('AGENTTEAMS_TEST_ADAPTER_SOURCE'):
         adapter = home / 'profiles/headless/node_modules/agentteams-teamharness-dsh'
-        for name in ('runner.js', 'session-receipt.js'):
-            shutil.copyfile(Path(override) / name, adapter / name)
+        for source in Path(override).glob('*.js'):
+            shutil.copyfile(source, adapter / source.name)
     plugin = Path('/opt/agentteams/plugins/teamharness')
     runtime = root / 'runtime.yaml'
     fixture = (plugin / 'adapters/deepseek-harness/fixtures/runtime.yaml').read_text()

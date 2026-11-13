@@ -19,6 +19,7 @@
     "probe.js",
     "runner.js",
     "session-receipt.js",
+    "matrix-interactions.js",
     "turn.js",
     "cordis.patch.yml"
   ],
