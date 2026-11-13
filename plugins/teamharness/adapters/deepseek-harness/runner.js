@@ -5,6 +5,7 @@ import { freezeMessage, MessageId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { matrixEventMessageId } from './message-id.js'
 import { executeAttempt } from './turn.js'
+import { installMatrixInteractions } from './matrix-interactions.js'
 
 
 export const name = 'agentteams-headless-runner'
@@ -60,6 +61,16 @@ async function run(ctx, config, io) {
   const agents = ctx.get('agents')
   if (defaultModel === undefined || sessions === undefined || agents === undefined) return
 
+  let interactions
+  if (process.env.TEAMHARNESS_MATRIX_ROOM_ID && process.env.TEAMHARNESS_MATRIX_SENDER) {
+    interactions = installMatrixInteractions(ctx, {
+      url: process.env.AGENTTEAMS_MATRIX_URL,
+      token: process.env.AGENTTEAMS_WORKER_MATRIX_TOKEN,
+      room: process.env.TEAMHARNESS_MATRIX_ROOM_ID,
+      sender: process.env.TEAMHARNESS_MATRIX_SENDER,
+    })
+  }
+
   const selection = defaultModel.currentSelection()
   const sessionId = SessionId(config.sessionId || `session-${randomUUID()}`)
   const { agent } = await openAgent(ctx, sessionId, config.resume, selection)
@@ -79,6 +90,8 @@ async function run(ctx, config, io) {
     whenIdle: () => agent.whenIdle(),
     flush: () => sessions.flush(agent.session),
   })
+
+  await interactions?.flush()
 
   io.stdout.write((outcome?.text ?? '') + '\n')
   if (outcome?.reason?.kind === 'error') {
