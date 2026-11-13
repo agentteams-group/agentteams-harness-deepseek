@@ -365,6 +365,8 @@ def run_dsh(
     resume: bool,
     event_id: str,
     attempt: int,
+    room_id: str = "",
+    sender: str = "",
 ) -> str:
     environment = os.environ.copy()
     runtime_path = environment.get("TEAMHARNESS_RUNTIME_CONFIG")
@@ -382,6 +384,8 @@ def run_dsh(
             "TEAMHARNESS_DSH_RESUME": "true" if resume else "false",
             "TEAMHARNESS_MATRIX_EVENT_ID": event_id,
             "TEAMHARNESS_DSH_ATTEMPT": str(attempt),
+            "TEAMHARNESS_MATRIX_ROOM_ID": room_id,
+            "TEAMHARNESS_MATRIX_SENDER": sender,
         }
     )
     completed = subprocess.run(
@@ -487,6 +491,12 @@ def main() -> int:
             client.fill_timeline_gaps(payload, since, room_types)
             batch_complete = True
             for event in matrix_events(payload, room_types, own_user_id, agent_user_ids, allowed_senders):
+                # Consumed by the native interaction waiter while run_dsh was
+                # blocked; stale controls must never start another model turn.
+                if re.sub(r"^(?:@\S+\s+)+", "", str(event.get("body", "")).strip()).startswith("/agentteams-approval "):
+                    continue
+                if isinstance(event.get("answer"), dict) and event["answer"].get("confirmation_id"):
+                    continue
                 if state.is_completed(event["event_id"]):
                     continue
                 session_id, resume = state.session_for(event["room_id"])
@@ -515,6 +525,8 @@ def main() -> int:
                             resume=resume,
                             event_id=event["event_id"],
                             attempt=attempts,
+                            room_id=event["room_id"],
+                            sender=event["sender"],
                         )
                         sync_sessions(worker_name)
                         state.mark_session_ready(event["room_id"])
