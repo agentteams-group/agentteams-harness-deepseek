@@ -5,6 +5,7 @@ import { freezeMessage, MessageId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { matrixEventMessageId } from './message-id.js'
 import { executeAttempt } from './turn.js'
+import { checkpointInput } from './session-receipt.js'
 
 
 export const name = 'agentteams-headless-runner'
@@ -70,6 +71,18 @@ async function run(ctx, config, io) {
   }
 
   const id = messageId(config.eventId, config.attempt)
+  const receipt = {
+    id, eventId: config.eventId, roomId: process.env.TEAMHARNESS_MATRIX_ROOM_ID,
+    workspace: process.env.HOME, flush: session => sessions.flush(session),
+  }
+  let receiptCheckpoint = Promise.resolve()
+  ctx.on('session/event', (session, event) => {
+    if (session !== agent.session || event.type !== 'user/message' || event.data.id !== id) return
+    receiptCheckpoint = Promise.resolve().then(() => checkpointInput(session, event, receipt))
+    return receiptCheckpoint
+  })
+  const existingInput = agent.session.events.find(event => event.type === 'user/message' && event.data.id === id)
+  if (existingInput) await checkpointInput(agent.session, existingInput, receipt)
   const outcome = await executeAttempt({
     getEvents: () => agent.session.events,
     id,
@@ -80,6 +93,7 @@ async function run(ctx, config, io) {
     flush: () => sessions.flush(agent.session),
   })
 
+  await receiptCheckpoint.catch(() => {})
   io.stdout.write((outcome?.text ?? '') + '\n')
   if (outcome?.reason?.kind === 'error') {
     io.stderr.write(`dsh: ${outcome.reason.error.code}: ${outcome.reason.error.message}\n`)

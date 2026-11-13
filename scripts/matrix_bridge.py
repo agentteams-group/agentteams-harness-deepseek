@@ -365,6 +365,7 @@ def run_dsh(
     resume: bool,
     event_id: str,
     attempt: int,
+    room_id: str = "",
 ) -> str:
     environment = os.environ.copy()
     runtime_path = environment.get("TEAMHARNESS_RUNTIME_CONFIG")
@@ -381,6 +382,7 @@ def run_dsh(
             "TEAMHARNESS_DSH_SESSION_ID": session_id,
             "TEAMHARNESS_DSH_RESUME": "true" if resume else "false",
             "TEAMHARNESS_MATRIX_EVENT_ID": event_id,
+            "TEAMHARNESS_MATRIX_ROOM_ID": room_id,
             "TEAMHARNESS_DSH_ATTEMPT": str(attempt),
         }
     )
@@ -515,6 +517,7 @@ def main() -> int:
                             resume=resume,
                             event_id=event["event_id"],
                             attempt=attempts,
+                            room_id=event["room_id"],
                         )
                         sync_sessions(worker_name)
                         state.mark_session_ready(event["room_id"])

@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
@@ -23,6 +24,14 @@ class Model(BaseHTTPRequestHandler):
     def do_POST(self):
         assert self.path == '/chat/completions', self.path
         request = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        if request.get('tools'):
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if any(type(self).expected_event in path.read_text() for path in type(self).checkpoints.glob('*.json')):
+                    break
+                time.sleep(0.01)
+            else:
+                raise AssertionError('Native input must be checkpointed before the model answers')
         assert request['model'] == 'deepseek-v4-flash', request['model']
         type(self).calls += 1
         type(self).tool_messages.extend(m for m in request['messages'] if m.get('role') == 'tool')
@@ -61,6 +70,10 @@ with tempfile.TemporaryDirectory() as temp:
     root = Path(temp)
     home = root / 'dsh'
     shutil.copytree('/opt/agentteams/dsh-template', home)
+    if override := os.getenv('AGENTTEAMS_TEST_ADAPTER_SOURCE'):
+        adapter = home / 'profiles/headless/node_modules/agentteams-teamharness-dsh'
+        for name in ('runner.js', 'session-receipt.js'):
+            shutil.copyfile(Path(override) / name, adapter / name)
     plugin = Path('/opt/agentteams/plugins/teamharness')
     runtime = root / 'runtime.yaml'
     fixture = (plugin / 'adapters/deepseek-harness/fixtures/runtime.yaml').read_text()
@@ -69,10 +82,13 @@ with tempfile.TemporaryDirectory() as temp:
     workspace.mkdir()
     Model.output_file = workspace / 'smoke.txt'
     Model.output_file.write_text('tool replay smoke\n')
+    Model.checkpoints = root / '.agentteams/dsh-checkpoints'
+    Model.expected_event = '$headless-smoke-first'
     server = ThreadingHTTPServer(('127.0.0.1', 0), Model)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         env = {**os.environ,
+            'HOME': str(root),
             'DSH_HOME': str(home),
             'DEEPSEEK_API_KEY': 'smoke-not-a-real-key',
             'DEEPSEEK_BASE_URL': f'http://127.0.0.1:{server.server_port}',
@@ -84,6 +100,7 @@ with tempfile.TemporaryDirectory() as temp:
             'TEAMHARNESS_PYTHON': '/usr/bin/python3',
             'TEAMHARNESS_DSH_SESSION_ID': 'session-headless-smoke',
             'TEAMHARNESS_MATRIX_EVENT_ID': '$headless-smoke-first',
+            'TEAMHARNESS_MATRIX_ROOM_ID': '!smoke:matrix',
         }
         result = subprocess.run(['agentteams-dsh', 'Read smoke.txt, then reply HEADLESS_SMOKE_OK.'], cwd=workspace, env=env, capture_output=True, text=True, timeout=45)
         assert result.returncode == 0, result.stderr
@@ -91,6 +108,7 @@ with tempfile.TemporaryDirectory() as temp:
         assert Model.saw_tool_result, Model.tool_messages
         assert Model.calls >= 1, Model.calls
         env.update({'TEAMHARNESS_DSH_RESUME': 'true', 'TEAMHARNESS_MATRIX_EVENT_ID': '$headless-smoke-second'})
+        Model.expected_event = '$headless-smoke-second'
         resumed = subprocess.run(['agentteams-dsh', 'Reply HEADLESS_SMOKE_OK again without tools.'], cwd=workspace, env=env, capture_output=True, text=True, timeout=45)
         assert resumed.returncode == 0, resumed.stderr
         assert resumed.stdout.strip() == 'HEADLESS_SMOKE_OK', resumed.stdout

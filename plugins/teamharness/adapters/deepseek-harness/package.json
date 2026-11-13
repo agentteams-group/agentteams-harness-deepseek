@@ -18,6 +18,7 @@
     "prepare-skills.js",
     "probe.js",
     "runner.js",
+    "session-receipt.js",
     "turn.js",
     "cordis.patch.yml"
   ],
