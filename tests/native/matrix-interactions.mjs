@@ -7,8 +7,12 @@ import { UserQuestionService } from '@deepseek-ai/dsh-user-questions'
 const { installMatrixInteractions } = await import(process.env.AGENTTEAMS_INTERACTIONS_MODULE
   ?? new URL('../../plugins/teamharness/adapters/deepseek-harness/matrix-interactions.js', import.meta.url).href)
 
-for (const [action, expected] of [['approve', 'allowed-once'], ['deny', 'rejected']]) {
-  test(`native DSH approval ${action} gates execution and records the committed receipt`, async () => {
+for (const [action, expected, requester, admin] of [
+  ['approve', 'allowed-once', '@owner', undefined],
+  ['deny', 'rejected', '@owner', undefined],
+  ['approve', 'allowed-once', '@agent', '@owner'],
+]) {
+  test(`native DSH approval ${action} by ${admin ? 'admin' : 'owner'} gates execution and records the committed receipt`, async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore).await()
     await ctx.plugin(ApprovalService, { policy: 'ask' }).await()
@@ -16,7 +20,7 @@ for (const [action, expected] of [['approve', 'allowed-once'], ['deny', 'rejecte
     let pending
     let syncs = 0
     const transport = installMatrixInteractions(ctx, {
-      url: 'http://matrix.test', token: 'test', room: '!room', sender: '@owner',
+      url: 'http://matrix.test', token: 'test', room: '!room', sender: requester, admin,
       request: async (url, options) => {
         if (options.method === 'PUT') {
           const content = JSON.parse(options.body)

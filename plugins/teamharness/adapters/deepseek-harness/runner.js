@@ -68,6 +68,10 @@ async function run(ctx, config, io) {
       token: process.env.AGENTTEAMS_WORKER_MATRIX_TOKEN,
       room: process.env.TEAMHARNESS_MATRIX_ROOM_ID,
       sender: process.env.TEAMHARNESS_MATRIX_SENDER,
+      admin: process.env.AGENTTEAMS_ADMIN_USER?.startsWith('@')
+        ? process.env.AGENTTEAMS_ADMIN_USER
+        : process.env.AGENTTEAMS_ADMIN_USER && process.env.AGENTTEAMS_MATRIX_DOMAIN
+          ? `@${process.env.AGENTTEAMS_ADMIN_USER}:${process.env.AGENTTEAMS_MATRIX_DOMAIN}` : undefined,
     })
   }
 

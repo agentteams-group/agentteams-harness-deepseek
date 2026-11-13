@@ -4,8 +4,8 @@ const KEY = 'org.agentteams.approval'
 
 /** Human replies stay bound to the owning Matrix turn, even during a blocked tool. */
 export class MatrixInteractions {
-  constructor({ url, token, room, sender, request = fetch }) {
-    Object.assign(this, { url: url.replace(/\/$/, ''), token, room, sender, request })
+  constructor({ url, token, room, sender, admin, request = fetch }) {
+    Object.assign(this, { url: url.replace(/\/$/, ''), token, room, sender, admin, request })
   }
 
   async api(path, body, signal) {
@@ -31,7 +31,7 @@ export class MatrixInteractions {
       const batch = await this.api(`/sync?timeout=20000&since=${encodeURIComponent(since)}`, undefined, stop)
       since = batch.next_batch
       for (const event of batch.rooms?.join?.[this.room]?.timeline?.events ?? []) {
-        if (event.type !== 'm.room.message' || event.sender !== this.sender) continue
+        if (event.type !== 'm.room.message' || (event.sender !== this.sender && event.sender !== this.admin)) continue
         const result = accept(event.content ?? {})
         if (result !== undefined) return result
       }
