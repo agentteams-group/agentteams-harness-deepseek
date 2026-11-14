@@ -20,10 +20,17 @@ class Model(BaseHTTPRequestHandler):
     saw_tool_result = False
     tool_messages = []
     sent_tool = False
+    fail_model = False
 
     def do_POST(self):
         assert self.path == '/chat/completions', self.path
         request = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        if type(self).fail_model:
+            self.send_response(401)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(b'{"error":{"message":"native model Unauthorized HTTP 401","type":"invalid_api_key"}}')
+            return
         if request.get('tools'):
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
@@ -101,17 +108,44 @@ with tempfile.TemporaryDirectory() as temp:
             'TEAMHARNESS_DSH_SESSION_ID': 'session-headless-smoke',
             'TEAMHARNESS_MATRIX_EVENT_ID': '$headless-smoke-first',
             'TEAMHARNESS_MATRIX_ROOM_ID': '!smoke:matrix',
+            'AGENTTEAMS_LOG_CAPTURED': '1',
         }
         result = subprocess.run(['agentteams-dsh', 'Read smoke.txt, then reply HEADLESS_SMOKE_OK.'], cwd=workspace, env=env, capture_output=True, text=True, timeout=45)
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == 'HEADLESS_SMOKE_OK', result.stdout
         assert Model.saw_tool_result, Model.tool_messages
         assert Model.calls >= 1, Model.calls
+        def records(result):
+            return [json.loads(line.partition('] ')[2]) for line in result.stderr.splitlines()
+                    if line.startswith('[agentteams-native-event] ')]
+        native = records(result)
+        assert any(record['event'] == 'model.begin' for record in native), native
+        assert any(record['event'] == 'model.end' for record in native), native
+        tool = next(record for record in native if record['event'] == 'tool.end')
+        assert tool['fields']['item_id'] == 'call-smoke-1', tool
+        assert tool['fields']['status'] == 'completed', tool
         env.update({'TEAMHARNESS_DSH_RESUME': 'true', 'TEAMHARNESS_MATRIX_EVENT_ID': '$headless-smoke-second'})
         Model.expected_event = '$headless-smoke-second'
         resumed = subprocess.run(['agentteams-dsh', 'Reply HEADLESS_SMOKE_OK again without tools.'], cwd=workspace, env=env, capture_output=True, text=True, timeout=45)
         assert resumed.returncode == 0, resumed.stderr
         assert resumed.stdout.strip() == 'HEADLESS_SMOKE_OK', resumed.stdout
+        Model.sent_tool = False
+        Model.output_file = workspace / 'missing-file.txt'
+        Model.expected_event = '$headless-smoke-tool-failure'
+        env['TEAMHARNESS_MATRIX_EVENT_ID'] = Model.expected_event
+        failed_tool = subprocess.run(['agentteams-dsh', 'Read missing-file.txt.'], cwd=workspace, env=env, capture_output=True, text=True, timeout=45)
+        assert failed_tool.returncode == 0, failed_tool.stderr
+        failure = next(record for record in records(failed_tool) if record['event'] == 'tool.end')
+        assert failure['fields']['status'] == 'failed', failure
+        assert failure['fields']['error'], failure
+        Model.fail_model = True
+        Model.expected_event = '$headless-smoke-model-failure'
+        env['TEAMHARNESS_MATRIX_EVENT_ID'] = Model.expected_event
+        failed_model = subprocess.run(['agentteams-dsh', 'Reply OK.'], cwd=workspace, env=env, capture_output=True, text=True, timeout=45)
+        assert failed_model.returncode != 0, failed_model.stdout
+        failure = next(record for record in records(failed_model) if record['event'] == 'turn.failed')
+        assert '401' in failure['fields']['error'] or 'Unauthorized' in failure['fields']['error'], failure
+        print('Native model HTTP 401 and failed tool retain concrete errors: PASS')
         print('Packaged DSH boot, tool execution, streamed tool ID, and session resume: PASS')
     finally:
         server.shutdown()

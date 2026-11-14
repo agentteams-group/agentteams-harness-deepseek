@@ -27,6 +27,11 @@ from matrix_channel import (
 )
 
 STOP = threading.Event()
+try:
+    from runtime_observability import event as trace_event
+except ImportError:
+    def trace_event(*args, **kwargs):
+        pass  # Standalone packages can run without container logging.
 
 
 def required_env(name: str) -> str:
@@ -393,6 +398,20 @@ def run_dsh(
             "TEAMHARNESS_SESSION_SOURCE_EVENT_IDS": json.dumps(source_event_ids or [event_id]),
         }
     )
+    trace_event("inference.begin", event_id=event_id, room_id=room_id, session_id=session_id, attempt=attempt, layer="agent_turn")
+    try:
+        return _execute_dsh(task, workspace, timeout_seconds, environment, poll_control, event_id, session_id)
+    except (OSError, subprocess.SubprocessError, RuntimeError, TimeoutError, InterruptedError) as error:
+        # TimeoutExpired and CalledProcessError include the task in their command.
+        detail = f"Agent turn timed out after {timeout_seconds}s" if isinstance(error, subprocess.TimeoutExpired) else str(error)
+        if isinstance(error, subprocess.CalledProcessError):
+            detail = f"Agent turn exited with code {error.returncode}"
+        trace_event("inference.failed", event_id=event_id, room_id=room_id, session_id=session_id,
+                    error_type=type(error).__name__, error=detail[:4096], layer="agent_turn")
+        raise
+
+
+def _execute_dsh(task, workspace, timeout_seconds, environment, poll_control, event_id, session_id):
     process = subprocess.Popen(
         ["agentteams-dsh", task],
         cwd=workspace,
@@ -429,6 +448,15 @@ def run_dsh(
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+    for line in stderr.splitlines():
+        if line.startswith('[agentteams-native-event] '):
+            try:
+                record = json.loads(line.partition('] ')[2])
+                trace_event(record['event'], event_id=event_id, session_id=session_id, **record['fields'])
+            except (ValueError, KeyError, TypeError):
+                continue  # Diagnostic output must not invalidate the native result.
+    trace_event("inference.end", event_id=event_id, session_id=session_id, exit_code=process.returncode,
+                error=dsh_error_detail(stderr, process.returncode)[:4096] if process.returncode else None, layer="agent_turn")
     answer = stdout.strip()
     if process.returncode != 0:
         detail = dsh_error_detail(stderr, process.returncode)
@@ -554,6 +582,7 @@ def main() -> int:
     max_attempts = max(1, int(os.getenv("AGENTTEAMS_MATRIX_EVENT_MAX_ATTEMPTS", "3")))
     retry_base_seconds = max(1, int(os.getenv("AGENTTEAMS_MATRIX_RETRY_BASE_SECONDS", "2")))
     print(f"[agentteams-dsh-worker] ready worker={worker_name} rooms={len(room_types)}", flush=True)
+    trace_event("runtime.ready", evidence="matrix_sync")
     if os.getenv("AGENTTEAMS_CONTROLLER_URL"):
         subprocess.run(["agt", "worker", "report-ready", "--name",
                         os.getenv("AGENTTEAMS_WORKER_CR_NAME", worker_name)], check=True)
@@ -592,6 +621,7 @@ def main() -> int:
                     state.save()
                     continue
                 session_id, resume = state.session_for(event["room_id"])
+                trace_event("message.received", room_id=event["room_id"], event_id=event["event_id"], sender=event["sender"])
                 attempts = state.begin_event(event["event_id"], event["room_id"])
                 state.save()
                 push_runtime_state(worker_name, state_path)
@@ -649,6 +679,7 @@ def main() -> int:
                         reply_mentions,
                         bool(source_agent),
                     )
+                    trace_event("message.sent", room_id=event["room_id"], event_id=event["event_id"], reply_event_id=reply_event_id)
                     send_output_paths(
                         client,
                         event["room_id"],
@@ -672,6 +703,7 @@ def main() -> int:
                     if direct and not STOP.is_set():
                         execution_status(client, event, "stopped")
                 except Exception as error:
+                    trace_event("turn.failed", room_id=event["room_id"], event_id=event["event_id"], error_type=type(error).__name__, error=str(error)[:4096])
                     if direct:
                         execution_status(client, event, "failed")
                     state.mark_failure(event["event_id"], str(error))
@@ -716,6 +748,7 @@ def main() -> int:
             json.JSONDecodeError,
             subprocess.SubprocessError,
         ) as error:
+            trace_event("matrix.failed", error_type=type(error).__name__, error=str(error)[:4096])
             print(f"[agentteams-dsh-worker] channel error: {error}", flush=True)
             STOP.wait(2)
     return 0
