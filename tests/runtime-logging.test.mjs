@@ -1,6 +1,15 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { runtimeRecord } from '../plugins/teamharness/adapters/deepseek-harness/runtime-logging.js'
+
+test('the distributable adapter contains the logging module imported by the runner', () => {
+  const packed = spawnSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
+    cwd: new URL('../plugins/teamharness/adapters/deepseek-harness/', import.meta.url), encoding: 'utf8',
+  })
+  assert.equal(packed.status, 0, packed.stderr)
+  assert.ok(JSON.parse(packed.stdout)[0].files.some(file => file.path === 'runtime-logging.js'))
+})
 
 test('native operation logs omit prompts, answers and tool arguments', () => {
   assert.equal(runtimeRecord({ type: 'user/message', data: { content: 'private prompt' } }), undefined)

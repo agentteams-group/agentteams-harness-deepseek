@@ -18,6 +18,7 @@
     "prepare-skills.js",
     "probe.js",
     "runner.js",
+    "runtime-logging.js",
     "session-receipt.js",
     "matrix-interactions.js",
     "turn.js",
