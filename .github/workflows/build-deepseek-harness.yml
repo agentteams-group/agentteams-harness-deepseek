@@ -41,8 +41,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Read Core dependency
+        id: core
+        run: |
+          source versions.env
+          echo "ref=$AT_REF" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout shared logging library
+        uses: actions/checkout@v4
+        with:
+          repository: agentscope-ai/AgentTeams
+          ref: ${{ steps.core.outputs.ref }}
+          path: .deps/AgentTeams
+
       - name: Unit tests
         run: make test
+        env:
+          AT_SOURCE: ${{ github.workspace }}/.deps/AgentTeams
 
       - name: Resolve runtime version
         id: meta

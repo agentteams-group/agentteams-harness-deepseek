@@ -6,10 +6,23 @@ import unittest
 
 ENTRYPOINT = Path(__file__).resolve().parents[1] / "scripts" / "deepseek-harness-worker-entrypoint.sh"
 LAUNCHER = Path(__file__).resolve().parents[1] / "scripts" / "agentteams-dsh"
+AT_SOURCE = Path(os.environ.get("AT_SOURCE", Path(__file__).resolve().parents[2]))
 
 
 @unittest.skipIf(os.name == "nt", "requires POSIX bash")
 class DeepSeekHarnessEntrypointTest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from unittest.mock import patch
+        self.logs = tempfile.TemporaryDirectory()
+        self.addCleanup(self.logs.cleanup)
+        env = patch.dict(os.environ, {
+            'AGENTTEAMS_LOG_LIB_DIR': str(AT_SOURCE / 'shared/lib'),
+            'AGENTTEAMS_LOG_DIR': self.logs.name,
+        })
+        env.start()
+        self.addCleanup(env.stop)
+
     def test_e2ee_configuration_fails_before_worker_startup(self) -> None:
         completed = subprocess.run(
             ["bash", str(ENTRYPOINT)],

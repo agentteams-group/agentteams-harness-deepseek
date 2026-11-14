@@ -1,4 +1,9 @@
 #!/bin/bash
+if [ "${AGENTTEAMS_LOG_CAPTURED:-}" != "1" ]; then
+    exec python3 "${AGENTTEAMS_LOG_LIB_DIR:-/opt/agentteams/scripts/lib}/runtime_supervisor.py" --runtime deepseek-harness -- bash "$0" "$@"
+fi
+python3 "${AGENTTEAMS_LOG_LIB_DIR:-/opt/agentteams/scripts/lib}/runtime_observability.py" bootstrap
+
 set -euo pipefail
 
 if [ "${AGENTTEAMS_MATRIX_E2EE:-0}" = "1" ] || [ "${AGENTTEAMS_MATRIX_E2EE:-}" = "true" ]; then

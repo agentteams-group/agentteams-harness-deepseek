@@ -7,6 +7,7 @@ import { matrixEventMessageId } from './message-id.js'
 import { executeAttempt } from './turn.js'
 import { checkpointInput } from './session-receipt.js'
 import { installMatrixInteractions } from './matrix-interactions.js'
+import { runtimeRecord } from './runtime-logging.js'
 
 
 export const name = 'agentteams-headless-runner'
@@ -93,6 +94,10 @@ async function run(ctx, config, io) {
   }
   let receiptCheckpoint = Promise.resolve()
   ctx.on('session/event', (session, event) => {
+    if (session === agent.session && process.env.AGENTTEAMS_LOG_CAPTURED === '1') {
+      const record = runtimeRecord(event)
+      if (record) io.stderr.write('[agentteams-native-event] ' + JSON.stringify(record) + '\n')
+    }
     if (session !== agent.session || event.type !== 'user/message' || event.data.id !== id) return
     receiptCheckpoint = Promise.resolve().then(() => checkpointInput(session, event, receipt))
     return receiptCheckpoint
