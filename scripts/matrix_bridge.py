@@ -474,7 +474,7 @@ def _execute_dsh(task, workspace, timeout_seconds, environment, poll_control, ev
 
 
 def recover_tasks(client, state, worker_name, workspace, timeout_seconds, own_user_id, admitted,
-                  *, source_events=(), claim_only=False):
+                  *, source_events=()):
     from task_recovery import Recovery, enabled
     if not enabled():
         return
@@ -483,8 +483,6 @@ def recover_tasks(client, state, worker_name, workspace, timeout_seconds, own_us
     for entry in snapshot["tasks"]:
         task_id, team = entry["task"]["task_id"], entry["team_id"]
         claimed = recovery.claim(snapshot, entry)
-        if claim_only:
-            continue
         task = claimed["task"]
         cp = task["execution"].get("checkpoint") or {}
         if cp.get("delivery") == "pending":
@@ -637,9 +635,9 @@ def main() -> int:
     since = state.next_batch
     client = MatrixClient(homeserver, token)
     admitted_tasks = set()
-    recover_tasks(client, state, worker_name, workspace,
-        int(os.getenv("AGENTTEAMS_DSH_TASK_TIMEOUT_SECONDS", "3600")), own_user_id, admitted_tasks, claim_only=True)
     threading.Thread(target=serve_health, name="health", daemon=True).start()
+    recover_tasks(client, state, worker_name, workspace,
+        int(os.getenv("AGENTTEAMS_DSH_TASK_TIMEOUT_SECONDS", "3600")), own_user_id, admitted_tasks)
 
     # Process this first batch through the normal loop. A missing local cursor
     # must not discard pending Matrix input when changing Harnesses.

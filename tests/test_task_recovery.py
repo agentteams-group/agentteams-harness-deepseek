@@ -70,12 +70,6 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual(self.client.send_text.call_args.args, ("!room:test", "saved report"))
         self.recovery.delivered.assert_called_once_with("stable", "team", "$reply")
 
-    def test_claim_only_never_starts_a_turn_or_delivery(self):
-        self.recover(claim_only=True)
-        self.recovery.claim.assert_called_once()
-        self.run.assert_not_called()
-        self.client.send_text.assert_not_called()
-
     def test_actual_assignment_retains_its_native_read_source(self):
         source = {"event_id": "$assignment", "sender": "@leader:test", "coordination_session": "coordination-task:stable:delivery"}
         self.recover(source_events=[source])
@@ -147,10 +141,29 @@ class RecoveryTest(unittest.TestCase):
             self.assertEqual(matrix_bridge.main(), 0)
         self.assertEqual(self.run.call_args.args[0], "pending before startup")
         self.assertEqual(self.client.sync.call_count, 1)
-        self.assertTrue(recover.call_args_list[0].kwargs["claim_only"])
         saved = json.loads((self.workspace / "matrix-bridge-state.json").read_text())
         self.assertEqual(saved["next_batch"], "after-pending")
         self.assertEqual(saved["events"]["$pending"]["status"], "completed")
+
+    def test_startup_resumes_before_matrix_sync_and_preserves_its_backlog_on_failure(self):
+        runtime = self.workspace / "runtime.yaml"
+        runtime.write_text("member:\n  role: worker\n  matrixUserId: '@alice:test'\n  personalRoomId: '!personal:test'\n")
+        state_path = self.workspace / "matrix-bridge-state.json"
+        state_path.write_text(json.dumps(self.state.data))
+        self.client.sync.side_effect = RuntimeError("Matrix unavailable")
+        env = {"AGENTTEAMS_WORKER_NAME": "alice", "AGENTTEAMS_MATRIX_URL": "http://matrix.invalid",
+            "AGENTTEAMS_WORKER_MATRIX_TOKEN": "fixture", "TEAMHARNESS_RUNTIME_CONFIG": str(runtime),
+            "TEAMHARNESS_WORKSPACE": str(self.workspace), "AGENTTEAMS_MATRIX_DOMAIN": "test"}
+        with patch.dict(os.environ, env, clear=True), patch.object(matrix_bridge, "STOP", threading.Event()), \
+                patch.object(matrix_bridge, "MatrixClient", return_value=self.client), \
+                patch.object(matrix_bridge.threading, "Thread"):
+            with self.assertRaisesRegex(RuntimeError, "Matrix unavailable"):
+                matrix_bridge.main()
+        self.run.assert_called_once()
+        self.assertEqual(self.run.call_args.args[0], "continue step two")
+        saved = json.loads(state_path.read_text())
+        self.assertEqual(saved["next_batch"], "retained-cursor")
+        self.assertEqual(saved["events"]["$backlog"]["status"], "queued")
 
 
 if __name__ == "__main__":

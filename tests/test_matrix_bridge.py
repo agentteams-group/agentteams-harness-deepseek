@@ -70,6 +70,23 @@ class LimitedTimelineTest(unittest.TestCase):
                 {"from": [start], "to": ["end/+"], "dir": ["f"], "limit": ["100"]},
             )
 
+    def test_initial_sync_without_a_cursor_backfills_older_history(self):
+        room_id = "!watched:matrix.local"
+        timeline = {"limited": True, "prev_batch": "boundary", "events": [self.event("$latest")]}
+        payload = {"rooms": {"join": {room_id: {"timeline": timeline}}}}
+        client = MatrixClient("http://matrix.local", "token")
+        pages = [
+            {"chunk": [self.event("$newer")], "end": "older"},
+            {"chunk": [], "end": "oldest"},
+            {"chunk": [self.event("$older")]},
+        ]
+        with patch.object(client, "request", side_effect=pages) as request:
+            client.fill_timeline_gaps(payload, None, {room_id: "team"})
+        self.assertEqual([event["event_id"] for event in timeline["events"]], ["$older", "$newer", "$latest"])
+        for call, cursor in zip(request.call_args_list, ["boundary", "older", "oldest"]):
+            self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlsplit(call.args[1]).query),
+                {"from": [cursor], "dir": ["b"], "limit": ["100"]})
+
     def test_missing_boundary_and_repeated_page_token_do_not_consume_timeline(self):
         room_id = "!watched:matrix.local"
         timeline = {"limited": True, "events": [self.event("$latest")]}

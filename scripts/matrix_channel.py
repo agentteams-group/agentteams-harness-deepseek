@@ -170,7 +170,7 @@ class MatrixClient:
             query["since"] = since
         return self.request("GET", f"/_matrix/client/v3/sync?{urllib.parse.urlencode(query)}", timeout=max(10, timeout_ms // 1000 + 10))
 
-    def fill_timeline_gaps(self, payload: dict[str, Any], since: str, room_types: dict[str, str]) -> None:
+    def fill_timeline_gaps(self, payload: dict[str, Any], since: str | None, room_types: dict[str, str]) -> None:
         """Fetch events omitted from limited watched-room timelines before advancing the cursor."""
         joined = payload.get("rooms", {}).get("join", {})
         if not isinstance(joined, dict):
@@ -188,14 +188,17 @@ class MatrixClient:
             if not isinstance(events, list):
                 raise RuntimeError(f"limited Matrix timeline for {room_id} has no events list")
             room_path = urllib.parse.quote(room_id, safe="")
-            cursor = since
+            cursor = since or boundary
             seen: set[str] = set()
             gap: list[dict[str, Any]] = []
-            while cursor != boundary:
+            while not since or cursor != boundary:
                 if not cursor or cursor in seen:
                     raise RuntimeError(f"Matrix pagination did not advance for {room_id}")
                 seen.add(cursor)
-                query = urllib.parse.urlencode({"from": cursor, "to": boundary, "dir": "f", "limit": 100})
+                query_args = {"from": cursor, "dir": "f" if since else "b", "limit": 100}
+                if since:
+                    query_args["to"] = boundary
+                query = urllib.parse.urlencode(query_args)
                 page = self.request("GET", f"/_matrix/client/v3/rooms/{room_path}/messages?{query}")
                 chunk = page.get("chunk")
                 if not isinstance(chunk, list):
@@ -207,6 +210,8 @@ class MatrixClient:
                 if not isinstance(next_cursor, str):
                     raise RuntimeError(f"invalid Matrix pagination token for {room_id}")
                 cursor = next_cursor
+            if not since:
+                gap.reverse()
             # /sync and /messages can overlap, so retain only the first copy of each event.
             seen_events: set[str] = set()
             combined = []
