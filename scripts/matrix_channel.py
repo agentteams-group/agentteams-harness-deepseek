@@ -43,12 +43,24 @@ def matrix_events(
                 continue
             unsigned = event.get("unsigned")
             is_redacted = isinstance(unsigned, dict) and unsigned.get("redacted_because") is not None
-            if event.get("sender") == own_user_id or is_redacted:
+            if is_redacted:
                 continue
             content = event.get("content")
             if not isinstance(content, dict):
                 continue
             sender = str(event.get("sender") or "").strip()
+            if "org.agentteams.coordination" in content or content.get("org.agentteams.progress_only") is True:
+                try:
+                    from task_coordination import notification, IgnoredNotification
+                    packet = notification(content, room_id, sender, own_user_id)
+                except (ImportError, ValueError):
+                    continue  # Control packets fail closed on old or mismatched images.
+                found.append({"room_id": room_id, "event_id": event["event_id"],
+                    "sender": sender, "body": packet["text"], "kind": "text",
+                    "coordination_session": packet["session_id"]})
+                continue
+            if sender == own_user_id:
+                continue
             if allowed_senders is not None and sender not in allowed_senders:
                 continue
             mentions = content.get("m.mentions")
@@ -290,8 +302,12 @@ class MatrixClient:
         transaction_key: str | None = None,
         mentioned_user_ids: list[str] | None = None,
         auto_source_mention: bool = False,
+        progress_only: bool = False,
     ) -> str:
         content: dict[str, Any] = {"msgtype": "m.text", "body": text}
+        if progress_only:
+            content["org.agentteams.progress_only"] = True
+            mentioned_user_ids = []
         if reply_to:
             content["m.relates_to"] = {"m.in_reply_to": {"event_id": reply_to}}
         mentions = sorted({user_id for user_id in (mentioned_user_ids or []) if user_id})

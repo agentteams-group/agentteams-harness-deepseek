@@ -620,7 +620,7 @@ def main() -> int:
                     state.mark_completed(event["event_id"], "")
                     state.save()
                     continue
-                session_id, resume = state.session_for(event["room_id"])
+                session_id, resume = state.session_for(event.get("coordination_session", event["room_id"]))
                 trace_event("message.received", room_id=event["room_id"], event_id=event["event_id"], sender=event["sender"])
                 attempts = state.begin_event(event["event_id"], event["room_id"])
                 state.save()
@@ -659,7 +659,7 @@ def main() -> int:
                             source_event_ids=state.data["events"][event["event_id"]].get("direct_input_ids", [event["event_id"]]),
                         )
                         sync_sessions(worker_name)
-                        state.mark_session_ready(event["room_id"])
+                        state.mark_session_ready(event.get("coordination_session", event["room_id"]))
                         output_paths = changed_outbox_files(workspace, outbox_before)
                         sync_output_paths(worker_name, workspace, output_paths)
                         state.mark_answer(event["event_id"], answer, output_paths)
@@ -671,6 +671,8 @@ def main() -> int:
                     restore_output_paths(worker_name, workspace, output_paths)
                     source_agent = source_agent_reply_user_id(event, agent_user_ids, own_user_id)
                     reply_mentions = reply_mention_user_ids(event, answer, agent_user_ids, own_user_id)
+                    if event.get("coordination_session"):
+                        reply_mentions, source_agent = [], ""
                     reply_event_id = client.send_text(
                         event["room_id"],
                         answer,
@@ -678,6 +680,7 @@ def main() -> int:
                         f"{event['event_id']}:reply",
                         reply_mentions,
                         bool(source_agent),
+                        **({"progress_only": True} if event.get("coordination_session") else {}),
                     )
                     trace_event("message.sent", room_id=event["room_id"], event_id=event["event_id"], reply_event_id=reply_event_id)
                     send_output_paths(
@@ -688,6 +691,7 @@ def main() -> int:
                         output_paths,
                         [source_agent] if source_agent else [],
                         bool(source_agent),
+                        **({"progress_only": True} if event.get("coordination_session") else {}),
                     )
                     state.mark_completed(event["event_id"], reply_event_id)
                     if direct:
@@ -696,7 +700,7 @@ def main() -> int:
                     push_runtime_state(worker_name, state_path)
                 except InterruptedError:
                     sync_sessions(worker_name)
-                    state.mark_session_ready(event["room_id"])
+                    state.mark_session_ready(event.get("coordination_session", event["room_id"]))
                     state.mark_completed(event["event_id"], "")
                     state.save()
                     push_runtime_state(worker_name, state_path)
@@ -728,6 +732,7 @@ def main() -> int:
                         f"{event['event_id']}:failure",
                         reply_mention_user_ids(event, failure, agent_user_ids, own_user_id),
                         bool(source_agent),
+                        **({"progress_only": True} if event.get("coordination_session") else {}),
                     )
                     state.mark_completed(event["event_id"], failure_event_id)
                     state.save()
