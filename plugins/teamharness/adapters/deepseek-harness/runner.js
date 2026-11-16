@@ -51,7 +51,9 @@ async function openAgent(ctx, sessionId, resume, selection) {
     return agents.resume({ ...options, resumeSessionId: sessionId })
   }
   if (resume) {
-    throw new Error(`requested resume for missing DSH session ${sessionId}`)
+    const error = new Error(`requested resume for missing DSH session ${sessionId}`)
+    error.code = 'AGENTTEAMS_SESSION_MISSING'
+    throw error
   }
   return agents.create({ ...options, sessionId, meta: { cwd: process.cwd() } })
 }
@@ -131,6 +133,6 @@ export function apply(ctx, config) {
   const io = { stdout: process.stdout, stderr: process.stderr, exit }
   void run(ctx, config, io).catch((error) => {
     io.stderr.write(`dsh: ${error instanceof Error ? error.message : String(error)}\n`)
-    io.exit(1)
+    io.exit(error?.code === 'AGENTTEAMS_SESSION_MISSING' ? 75 : 1)
   })
 }

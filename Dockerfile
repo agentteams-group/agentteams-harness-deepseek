@@ -19,12 +19,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         jq \
         python3 \
+        python3-venv \
         tini \
         tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=mc /usr/bin/mc /usr/local/bin/mc.bin
 COPY --from=shared . /opt/agentteams/scripts/lib/
+RUN python3 -m venv /opt/venv/agentteams \
+    && /opt/venv/agentteams/bin/pip install --no-cache-dir -r /opt/agentteams/scripts/lib/telemetry/requirements.txt openai==2.54.0
+ENV PATH="/opt/venv/agentteams/bin:${PATH}" \
+    TEAMHARNESS_PYTHON=/opt/venv/agentteams/bin/python3
 COPY --from=controller /usr/local/bin/agt /usr/local/bin/agt
 
 COPY package.json /opt/agentteams/dsh/package.json

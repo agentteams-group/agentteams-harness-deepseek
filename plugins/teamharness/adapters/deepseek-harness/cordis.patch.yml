@@ -46,6 +46,7 @@
         args: ['mcp/server.py']
         cwd: !!js process.env.AGENTTEAMS_PLUGIN_DIR
         env:
+          AGENTTEAMS_AUTH_TOKEN_FILE: !!js process.env.AGENTTEAMS_AUTH_TOKEN_FILE || ''
           AGENTTEAMS_AGENT_ROLE: !!js process.env.AGENTTEAMS_AGENT_ROLE || ''
           AGENTTEAMS_PLUGIN_DIR: !!js process.env.AGENTTEAMS_PLUGIN_DIR
           TEAMHARNESS_RUNTIME_CONFIG: !!js process.env.TEAMHARNESS_RUNTIME_CONFIG
