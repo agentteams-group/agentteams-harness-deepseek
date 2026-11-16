@@ -13,6 +13,7 @@ import threading
 import time
 import urllib.error
 import urllib.parse
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -411,6 +412,10 @@ def run_dsh(
         raise
 
 
+class MissingNativeSession(RuntimeError):
+    """The runner rejected a missing cache before admitting input or tools."""
+
+
 def _execute_dsh(task, workspace, timeout_seconds, environment, poll_control, event_id, session_id):
     process = subprocess.Popen(
         ["agentteams-dsh", task],
@@ -458,12 +463,77 @@ def _execute_dsh(task, workspace, timeout_seconds, environment, poll_control, ev
     trace_event("inference.end", event_id=event_id, session_id=session_id, exit_code=process.returncode,
                 error=dsh_error_detail(stderr, process.returncode)[:4096] if process.returncode else None, layer="agent_turn")
     answer = stdout.strip()
+    if process.returncode == 75:
+        raise MissingNativeSession("DSH native session cache is missing")
     if process.returncode != 0:
         detail = dsh_error_detail(stderr, process.returncode)
         raise RuntimeError(f"DeepSeek Harness task failed: {detail}")
     if not answer:
         raise RuntimeError("DeepSeek Harness returned an empty answer")
     return answer
+
+
+def recover_tasks(client, state, worker_name, workspace, timeout_seconds, own_user_id, admitted,
+                  *, source_events=(), claim_only=False):
+    from task_recovery import Recovery, enabled
+    if not enabled():
+        return
+    recovery = Recovery()
+    snapshot = recovery.discover()
+    for entry in snapshot["tasks"]:
+        task_id, team = entry["task"]["task_id"], entry["team_id"]
+        claimed = recovery.claim(snapshot, entry)
+        if claim_only:
+            continue
+        task = claimed["task"]
+        cp = task["execution"].get("checkpoint") or {}
+        if cp.get("delivery") == "pending":
+            event_id = client.send_text(task["room_id"], claimed["saved_result"],
+                transaction_key=cp["reply_txn"], progress_only=True)
+            recovery.delivered(task_id, team, event_id)
+            task = recovery.current(task_id, team)
+            if task is None:
+                continue
+        admission = (team, task_id, task["execution"]["generation"])
+        if task["status"] == "submitted" or admission in admitted:
+            continue
+        key = team + "/" + task_id
+        marker = state.data.get("task_sessions", {}).get(key)
+        resume = recovery.session_usable(marker, task, "deepseek-harness")
+        session_id = marker["session_id"] if resume else "session-task-" + uuid.uuid4().hex
+        source = next((event for event in source_events
+            if event.get("coordination_session", "").startswith("coordination-task:" + task_id + ":")), None)
+        event_id = source["event_id"] if source else "recovery:" + key + ":" + str(admission[2])
+        kwargs = {"session_id": session_id, "resume": resume, "event_id": event_id, "attempt": 1,
+            "room_id": task["room_id"], "sender": source["sender"] if source else own_user_id,
+            "source_event_ids": [source["event_id"]] if source else []}
+        text = recovery.resume_text({**task, "team_id": team, "spec": claimed["spec"]})
+        # Reserve before execution. An unknown tool failure must not enter the
+        # ordinary Matrix event retry loop or start another turn in this boot.
+        admitted.add(admission)
+        try:
+            try:
+                answer = run_dsh(text, workspace, timeout_seconds, **kwargs)
+            except MissingNativeSession:
+                if not resume:
+                    raise
+                session_id = "session-task-" + uuid.uuid4().hex
+                kwargs.update(session_id=session_id, resume=False)
+                answer = run_dsh(text, workspace, timeout_seconds, **kwargs)
+            sync_sessions(worker_name)
+            saved, answer = recovery.prepare_reply(task_id, team, answer)
+        except Exception:
+            recovery.interrupted(task_id, team)
+            raise
+        cp = saved["execution"]["checkpoint"]
+        if cp.get("delivery") != "delivered":
+            reply_id = client.send_text(task["room_id"], answer, transaction_key=cp["reply_txn"], progress_only=True)
+            saved = recovery.delivered(task_id, team, reply_id)
+        state.data.setdefault("task_sessions", {})[key] = {"runtime": "deepseek-harness",
+            "session_id": session_id, "expires_at": time.time()+86400,
+            "checkpoint_digest": recovery.digest(saved["execution"]["checkpoint"])}
+        state.save()
+        push_runtime_state(worker_name, state.path)
 
 
 def direct_member(client, event, own_user_id, room_types, agent_user_ids):
@@ -566,16 +636,14 @@ def main() -> int:
         state.next_batch = legacy_cursor_path.read_text(encoding="utf-8").strip()
     since = state.next_batch
     client = MatrixClient(homeserver, token)
+    admitted_tasks = set()
+    recover_tasks(client, state, worker_name, workspace,
+        int(os.getenv("AGENTTEAMS_DSH_TASK_TIMEOUT_SECONDS", "3600")), own_user_id, admitted_tasks, claim_only=True)
     threading.Thread(target=serve_health, name="health", daemon=True).start()
 
-    if not since:
-        initial = client.sync(None, 0)
-        since = str(initial.get("next_batch") or "")
-        if not since:
-            raise RuntimeError("initial Matrix sync returned no next_batch")
-        state.next_batch = since
-        state.save()
-        push_runtime_state(worker_name, state_path)
+    # Process this first batch through the normal loop. A missing local cursor
+    # must not discard pending Matrix input when changing Harnesses.
+    initial = client.sync(since, 0)
 
     timeout_seconds = int(os.getenv("AGENTTEAMS_DSH_TASK_TIMEOUT_SECONDS", "3600"))
     attachment_max_bytes = int(os.getenv("AGENTTEAMS_MATRIX_ATTACHMENT_MAX_BYTES", str(25 * 1024 * 1024)))
@@ -597,7 +665,8 @@ def main() -> int:
                     f"[agentteams-dsh-worker] runtime config refreshed rooms={len(room_types)}",
                     flush=True,
                 )
-            payload = client.sync(since, 30_000)
+            payload = initial if initial is not None else client.sync(since, 30_000)
+            initial = None
             allowed_senders = None
             if runtime_section(runtime_path, "member").get("role") == "manager":
                 allowed_senders = manager_allowed_senders(runtime_path, matrix_domain)
@@ -605,8 +674,16 @@ def main() -> int:
                 # Manager spans its admin DM and all joined member rooms.
                 room_types.update({room: "team" for room in payload.get("rooms", {}).get("join", {}) if room not in room_types})
             client.fill_timeline_gaps(payload, since, room_types)
+            events = matrix_events(payload, room_types, own_user_id, agent_user_ids, allowed_senders)
+            recover_tasks(client, state, worker_name, workspace, timeout_seconds, own_user_id, admitted_tasks, source_events=events)
             batch_complete = True
-            for event in matrix_events(payload, room_types, own_user_id, agent_user_ids, allowed_senders):
+            for event in events:
+                if event.get("coordination_session", "").startswith("coordination-task:"):
+                    from task_recovery import enabled
+                    if enabled():
+                        state.mark_completed(event["event_id"], "")
+                        state.save()
+                        continue
                 # Consumed by the native interaction waiter while run_dsh was
                 # blocked; stale controls must never start another model turn.
                 if re.sub(r"^(?:@\S+\s+)+", "", str(event.get("body", "")).strip()).startswith("/agentteams-approval "):
@@ -750,6 +827,7 @@ def main() -> int:
             TimeoutError,
             OSError,
             RuntimeError,
+            ValueError,
             json.JSONDecodeError,
             subprocess.SubprocessError,
         ) as error:

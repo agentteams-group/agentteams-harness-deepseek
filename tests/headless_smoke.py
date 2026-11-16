@@ -110,6 +110,12 @@ with tempfile.TemporaryDirectory() as temp:
             'TEAMHARNESS_MATRIX_ROOM_ID': '!smoke:matrix',
             'AGENTTEAMS_LOG_CAPTURED': '1',
         }
+        missing = subprocess.run(['agentteams-dsh', 'Never run this task against a missing session.'], cwd=workspace,
+            env={**env, 'TEAMHARNESS_DSH_SESSION_ID': 'session-missing-cache', 'TEAMHARNESS_DSH_RESUME': 'true'},
+            capture_output=True, text=True, timeout=45)
+        assert missing.returncode == 75, missing.stderr
+        assert Model.calls == 0
+        assert not list(Model.checkpoints.glob('*.json'))
         result = subprocess.run(['agentteams-dsh', 'Read smoke.txt, then reply HEADLESS_SMOKE_OK.'], cwd=workspace, env=env, capture_output=True, text=True, timeout=45)
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == 'HEADLESS_SMOKE_OK', result.stdout
