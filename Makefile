@@ -11,6 +11,7 @@ BUILD_ARGS = --build-context shared=$(SHARED_CONTEXT) --build-context teamharnes
 
 .PHONY: test build push smoke
 test:
+	npm install --prefix plugins/teamharness/adapters/deepseek-harness --ignore-scripts --no-package-lock --omit=optional
 	python3 -m unittest discover -s tests -p 'test_*.py' -v
 	node --test tests/*.test.mjs
 
