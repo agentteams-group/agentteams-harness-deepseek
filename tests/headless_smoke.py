@@ -73,6 +73,12 @@ class Model(BaseHTTPRequestHandler):
 for helper in ('install-worker-skill.sh', 'safe-extract-worker-skill.py', 'push-worker-skills.sh'):
     assert Path('/opt/agentteams/agent/skills/worker-management/scripts', helper).is_file(), helper
 
+bootstrap = subprocess.run(['python3', '-c', 'from at_telemetry import configure; configure(local_only=True)'],
+    env={**os.environ, 'PYTHONPATH': '/opt/agentteams/scripts/lib/telemetry',
+        'AGENTTEAMS_OTEL_ENABLED': 'false', 'AGENTTEAMS_LOG_NATIVE_EVENTS': '0'},
+    capture_output=True, text=True, timeout=15)
+assert bootstrap.returncode == 0, bootstrap.stderr
+
 with tempfile.TemporaryDirectory() as temp:
     root = Path(temp)
     home = root / 'dsh'
