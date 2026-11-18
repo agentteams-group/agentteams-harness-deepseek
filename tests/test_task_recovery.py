@@ -166,7 +166,8 @@ class RecoveryTest(unittest.TestCase):
         self.run.assert_not_called()
         self.client.send_content.assert_not_called()
 
-    def test_first_sync_is_processed_before_committing_its_cursor(self):
+    def test_legacy_first_sync_is_processed_before_committing_its_cursor(self):
+        self.enterContext(patch("task_recovery.enabled", return_value=False))
         runtime = self.workspace / "runtime.yaml"
         runtime.write_text("member:\n  role: worker\n  matrixUserId: '@alice:test'\n  personalRoomId: '!personal:test'\n")
         stop = threading.Event()
@@ -202,15 +203,19 @@ class RecoveryTest(unittest.TestCase):
         runtime.write_text("member:\n  role: worker\n  matrixUserId: '@alice:test'\n  personalRoomId: '!personal:test'\n")
         state_path = self.workspace / "matrix-bridge-state.json"
         state_path.write_text(json.dumps(self.state.data))
-        self.client.sync.side_effect = RuntimeError("Matrix unavailable")
+        stop = threading.Event()
+        self.run.side_effect = lambda *args, **kwargs: (stop.set() or "answer")
+        self.enterContext(patch("worker_matrix_raw.RawWorkerSync.poll", side_effect=RuntimeError("Matrix unavailable")))
+        ready = self.enterContext(patch("worker_handoff.recovery_scanned"))
+        self.enterContext(patch("matrix_bridge.refresh_runtime_config"))
         env = {"DSH_HOME": self.temp.name, "AGENTTEAMS_WORKER_NAME": "alice", "AGENTTEAMS_MATRIX_URL": "http://matrix.invalid",
             "AGENTTEAMS_WORKER_MATRIX_TOKEN": "fixture", "TEAMHARNESS_RUNTIME_CONFIG": str(runtime),
             "TEAMHARNESS_WORKSPACE": str(self.workspace), "AGENTTEAMS_MATRIX_DOMAIN": "test"}
-        with patch.dict(os.environ, env, clear=True), patch.object(matrix_bridge, "STOP", threading.Event()), \
+        with patch.dict(os.environ, env, clear=True), patch.object(matrix_bridge, "STOP", stop), \
                 patch.object(matrix_bridge, "MatrixClient", return_value=self.client), \
                 patch.object(matrix_bridge.threading, "Thread"):
-            with self.assertRaisesRegex(RuntimeError, "Matrix unavailable"):
-                matrix_bridge.main()
+            self.assertEqual(matrix_bridge.main(), 0)
+        ready.assert_not_called()
         self.run.assert_called_once()
         self.assertEqual(self.run.call_args.args[0], "continue step two")
         saved = json.loads(state_path.read_text())

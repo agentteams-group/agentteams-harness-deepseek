@@ -100,7 +100,7 @@ async function run(ctx, config, io) {
     const body = source.input
     if (source.room_id !== process.env.TEAMHARNESS_MATRIX_ROOM_ID || source.event_id !== process.env.TEAMHARNESS_SOURCE_EVENT_ID ||
         body.sender !== process.env.TEAMHARNESS_MATRIX_SENDER) throw new Error('Unmatched Matrix source')
-    const native = userMessage(JSON.stringify({ room_id: source.room_id, event_id: source.event_id, ...body }), messageId(source.event_id, 1))
+    const native = userMessage(JSON.stringify({ room_id: source.room_id, event_id: source.event_id, ...body }), messageId('agentteams-source-v1:' + source.event_id, 1))
     const existing = agent.session.events.find(event => event.type === 'user/message' && event.data.id === native.id)
     if (existing && JSON.stringify(existing.data.content) !== JSON.stringify(native.content)) throw new Error('Different native Matrix source')
     if (!existing) agent.session.append('user/message', native, { surfaceOp: 'append' })

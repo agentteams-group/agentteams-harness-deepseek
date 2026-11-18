@@ -484,7 +484,7 @@ def _execute_dsh(task, workspace, timeout_seconds, environment, poll_control, ev
 def native_session_digest(session_id):
     # DSH rc.2 uses one JSONL log beneath the session's encoded ID. Our
     # generated ASCII references use only literal, filename-safe characters.
-    if not re.fullmatch(r"session-task-[0-9a-f]{32}", session_id):
+    if not re.fullmatch(r"session-(?:task|message)-[0-9a-f]{32}", session_id):
         return None
     root = Path(required_env("DSH_HOME")) / "sessions"
     logs = [p for p in root.glob("*/" + session_id + "/session.jsonl*")
@@ -507,6 +507,19 @@ def publish_task_reply(client, recovery, task, team, own_user_id, text):
     event_id = publish_raw_saved(client, task["room_id"], text, identity["checkpoint"], own_user_id, bind,
         content={"org.agentteams.progress_only": True}, legacy_transaction_id=matrix_transaction_id)
     return recovery.delivered(task_id, team, event_id)
+
+
+def task_stopped(recovery, task_id, team, source):
+    from task_recovery import RecoveryUnavailable
+    try:
+        task = recovery.current(task_id, team)
+    except RecoveryUnavailable:
+        return False
+    if not task:
+        return True
+    current = task.get("execution") or {}
+    return current.get("state") in {"cancelled", "released"} or any(
+        current.get(k) != source[k] for k in ("runtime", "instance_id", "process_id", "generation"))
 
 
 def recover_tasks(client, state, worker_name, workspace, timeout_seconds, own_user_id, admitted,
@@ -567,6 +580,7 @@ def recover_tasks(client, state, worker_name, workspace, timeout_seconds, own_us
         kwargs = {"session_id": session_id, "resume": resume, "event_id": event_id, "attempt": 1,
             "room_id": task["room_id"], "sender": source["sender"] if source else own_user_id,
             "source_event_ids": [source["event_id"]] if source else [],
+            "poll_control": lambda: task_stopped(recovery, task_id, team, task["execution"]),
             "source_key": source_key, "attach_only": attach_only, "identity": {"team_id": team, "task_id": task_id,
                 **{field: task["execution"][field] for field in ("generation", "instance_id", "process_id")}}}
         if attach_only:
@@ -602,6 +616,133 @@ def recover_tasks(client, state, worker_name, workspace, timeout_seconds, own_us
             view = sessions.load(work)
             if view["checkpoint_digest"] == recovery.digest(saved["execution"]["checkpoint"]):
                 sessions.remember(work, view, task["execution"], session_id, digest, int(time.time()) + 86400)
+
+
+def managed_matrix_event(source, room_types, own, agents, transport):
+    """Apply the projected sender policy before persisting actionable inputs."""
+    from task_coordination import IgnoredNotification, notification
+
+    room, raw = source["room_id"], source["input"]
+    content, sender = raw.get("content") or {}, raw.get("sender")
+    if not sender or room not in room_types or raw.get("unsigned", {}).get("redacted_because"):
+        return None
+    if "org.agentteams.coordination" in content:
+        try:
+            packet = notification(content, room, sender, own)
+        except IgnoredNotification:
+            return None
+        meta = packet["meta"]["teamharness_coordination"]
+        if meta["kind"] == "task_assigned":
+            return "task_notification", meta["task_id"], {"coordination_session": packet["session_id"], "body": packet["text"]}
+        return "message", None, {"coordination_session": packet["session_id"], "body": packet["text"]}
+    if content.get("org.agentteams.progress_only") or sender == own:
+        return None
+    personal = room_types[room] == "personal"
+    policy = (transport.get("dm") or {}).get("policy") if personal else transport.get("groupPolicy")
+    allow = (transport.get("dm") or {}).get("allowFrom", []) if personal else transport.get("groupAllowFrom", [])
+    if policy == "disabled" or (policy and policy != "open" and sender not in allow and "*" not in allow):
+        return None
+    event = {**raw, "event_id": source["event_id"]}
+    batch = {"rooms": {"join": {room: {"timeline": {"events": [event]}}}}}
+    parsed = matrix_events(batch, room_types, own, agents)
+    if not parsed:
+        return None
+    native = parsed[0]
+    if "execution_control" in native or "answer" in native or re.sub(r"^(?:@\S+\s+)+", "", native["body"]).startswith("/agentteams-approval "):
+        return "control", None, native
+    return "message", None, native
+
+
+def deliver_managed_message(client, matrix, claim, source, own, agents):
+    from worker_matrix_delivery import confirm_bound
+    from worker_matrix_raw import publish_raw_saved
+
+    identity, text = claim["identity"], claim["saved_result"]
+    content = {"m.relates_to": {"m.in_reply_to": {"event_id": source["event_id"]}}}
+    relation = (claim["input"]["input"]["content"].get("m.relates_to") or {})
+    if relation.get("rel_type") == "m.thread" and relation.get("event_id"):
+        content["m.relates_to"].update(rel_type="m.thread", event_id=relation["event_id"])
+    if source.get("coordination_session"):
+        content["org.agentteams.progress_only"] = True
+    else:
+        mentions = reply_mention_user_ids(source, text, agents, own)
+        if mentions:
+            content["m.mentions"] = {"user_ids": mentions}
+        if source_agent_reply_user_id(source, agents, own):
+            content["com.agentteams.auto_source_mention"] = True
+    def bind(checkpoint):
+        saved = matrix.message_checkpoint(identity, checkpoint)
+        confirm_bound(saved["execution"], identity, "deepseek-harness", checkpoint)
+    event = publish_raw_saved(client, source["room_id"], text, claim["execution"]["checkpoint"],
+                              own, bind, content=content, legacy_transaction_id=matrix_transaction_id)
+    return matrix.message_delivered(identity, event)
+
+
+def recover_message(client, matrix, sessions, source, own, agents, worker, workspace, timeout, poll_control=None):
+    from task_recovery import Recovery, RecoveryConflict
+
+    key = source["source_key"]
+    claim = matrix.message_claim(key)
+    mode, identity = claim["recovery"], claim["identity"]
+    if mode == "deliver":
+        return deliver_managed_message(client, matrix, claim, source, own, agents)
+    if mode != "resume":
+        return
+    work = {"kind": "message", "event_key": key}
+    view = sessions.load(work)
+    if view["generation"] != identity["generation"] or view["checkpoint_digest"] != claim["checkpoint_digest"]:
+        raise RecoveryConflict("Message checkpoint changed before session admission")
+    cached = (view.get("cache") or {}).get("native_ref", "")
+    reuse = bool(cached and sessions.usable(view, cached, native_session_digest(cached)))
+    ref = cached if reuse else "session-message-" + uuid.uuid4().hex
+    task = claim["resume_text"]
+    if source["kind"] != "text":
+        prompt, _ = materialize_attachment(source, client, workspace, int(os.getenv("AGENTTEAMS_MATRIX_ATTACHMENT_MAX_BYTES", 25 * 1024 * 1024)))
+        task += "\n" + prompt
+    def stopped():
+        from task_recovery import RecoveryUnavailable
+        try:
+            current = matrix._message_owned(identity)
+        except RecoveryUnavailable:
+            return False
+        except RecoveryConflict:
+            return True
+        return current["execution"]["state"] in {"cancelled", "released"} or bool(poll_control and poll_control(identity))
+    before = snapshot_outbox(workspace)
+    kwargs = dict(session_id=ref, resume=reuse, identity=identity, source_key=key,
+        room_id=source["room_id"], sender=source["sender"], source_event_ids=[source["event_id"]],
+        event_id=f"recovery:{key}:{identity['generation']}:{claim['checkpoint_digest']}", attempt=1, poll_control=stopped)
+    try:
+        text = run_dsh(task, workspace, timeout, **kwargs)
+    except MissingNativeSession:
+        if not reuse:
+            raise
+        ref = "session-message-" + uuid.uuid4().hex
+        text = run_dsh(task, workspace, timeout, **{**kwargs, "session_id":ref, "resume":False})
+    matrix.message_current(identity)
+    sync_sessions(worker)
+    for relative in changed_outbox_files(workspace, before):
+        path = workspace_output_path(workspace, relative)
+        with path.open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        call = {"id": "outbox:" + digest + ":" + relative, "name": "send_file",
+                "arguments": {"path": relative, "sha256": digest}}
+        op = matrix.message_begin_tools(identity, [call])
+        sync_output_paths(worker, workspace, [relative])
+        event = client.send_file(source["room_id"], path, source["event_id"], key + ":" + call["id"])
+        if not isinstance(event, str) or not event.startswith("$"):
+            raise RecoveryConflict("Matrix file delivery is unconfirmed")
+        matrix.message_finish_tools(identity, op, [{"id": call["id"], "content": {"event_id": event, "sha256": digest, "path":relative}}])
+    if text.strip() == "NO_REPLY":
+        matrix.message_cancel(identity)
+        return
+    saved = matrix.message_save_reply(identity, text)
+    delivered = deliver_managed_message(client, matrix, saved, source, own, agents)
+    digest = native_session_digest(ref)
+    if digest:
+        view = sessions.load(work)
+        if view["checkpoint_digest"] == Recovery.digest(delivered["execution"]["checkpoint"]):
+            sessions.remember(work, view, identity, ref, digest, int(time.time()) + 86400)
 
 
 def direct_member(client, event, own_user_id, room_types, agent_user_ids):
@@ -684,6 +825,126 @@ def serve_health() -> None:
     server.server_close()
 
 
+def run_managed_worker(client, worker, runtime_path, workspace, timeout, own, stop):
+    import yaml
+    from task_recovery import Recovery, RecoveryConflict
+    from worker_handoff import recovery_scanned
+    from worker_matrix_raw import RawWorkerSync
+    from worker_matrix_state import WorkerMatrix, matrix_event_key
+    from worker_sessions import WorkerSessions
+
+    recovery = Recovery(device_delivery=True)
+    matrix = WorkerMatrix("deepseek-harness", recovery=recovery)
+    sessions = WorkerSessions("deepseek-harness", recovery=recovery)
+    matrix.start()
+    admitted = set()
+    rooms, agents, transport = {}, set(), {}
+    joined = set()
+
+    def observe(payload):
+        for room in payload.get("rooms", {}).get("invite", {}):
+            if room in rooms:
+                client.request("POST", "/_matrix/client/v3/join/" + urllib.parse.quote(room, safe=""), {})
+        actual = client.request("GET", "/_matrix/client/v3/joined_rooms")["joined_rooms"]
+        joined.clear()
+        joined.update(room for room in actual if room in rooms)
+        return joined
+
+    def classify(room, raw):
+        source = {"room_id": room, "event_id": raw["event_id"], "input": raw}
+        native = managed_matrix_event(source, rooms, own, agents, transport)
+        return native[:2] if native else None
+
+    receiver = RawWorkerSync(matrix, client, own, classify, observe)
+    def pending_sources(snapshot):
+        sources = []
+        for row in matrix.pending(snapshot):
+            room = row["room_id"]
+            if room not in joined or snapshot["state"]["rooms"].get(room, {}).get("gaps"):
+                continue
+            parsed = managed_matrix_event(row, rooms, own, agents, transport)
+            if parsed is None or parsed[0] != row["intent"]:
+                continue
+            intent, task_id, event = parsed
+            if intent == "task_notification" and (not task_id or row.get("work", {}).get("task_id") != task_id):
+                continue
+            receipt = row.get("native_commit") or {}
+            start = receipt.get("start") or {}
+            sources.append({**event, "room_id": room, "event_id": row["event_id"], "sender": row["input"]["sender"],
+                "source_key": matrix_event_key(room, row["event_id"]), "kind": event.get("kind", "text"), "intent": intent,
+                "native_committed": start.get("process_id") == recovery.process})
+        return sources
+
+    def direct_controls(active, identity):
+        # Poll the same durable feed while a direct model/tool process is live.
+        snapshot, _ = receiver.poll(0)
+        for event in pending_sources(snapshot):
+            control = event.get("execution_control") or {}
+            if (event["intent"] != "control" or control.get("agent_id") != own
+                    or control.get("run_id") != active["event_id"] or event["room_id"] != active["room_id"]
+                    or event["sender"] != active["sender"] or not direct_member(client, event, own, rooms, agents)):
+                continue
+            if control.get("action") == "stop":
+                matrix.message_cancel(identity)
+                return True
+            if control.get("action") == "steer":
+                entry = matrix.message_current(identity)
+                cp = dict(entry["execution"].get("checkpoint") or {})
+                marker = "steer:" + event["source_key"]
+                steps = cp.get("completed_steps") or []
+                if marker not in steps:
+                    cp.update(version=cp.get("version", 0) + 1, completed_steps=[*steps, marker],
+                              remaining_steps=[*(cp.get("remaining_steps") or []), event["body"]])
+                    matrix.message_checkpoint(identity, cp)
+                    return True
+        return False
+
+    reported_ready = False
+    while not stop.is_set():
+        try:
+            refresh_runtime_config(worker, runtime_path)
+            record = yaml.safe_load(runtime_path.read_text())
+            configured_own, configured_rooms = runtime_matrix_context(runtime_path, worker, required_env("AGENTTEAMS_MATRIX_DOMAIN"))
+            if configured_own != own:
+                raise RecoveryConflict("Matrix account changed during the current Worker start")
+            tasks = recovery.discover()
+            rooms.clear()
+            rooms.update(configured_rooms)
+            for entry in tasks["tasks"]:
+                room = entry["task"].get("room_id")
+                if room:
+                    rooms.setdefault(room, "team")
+            agents = runtime_agent_user_ids(runtime_path)
+            transport = (record.get("matrix") or {}).get("transport") or {}
+            try:
+                snapshot, failures = receiver.poll(1000)
+            except (ValueError, OSError, RuntimeError):
+                # Matrix may be temporarily offline. Independently assigned Tasks
+                # still progress, but readiness waits for a real Matrix scan.
+                recover_tasks(client, None, worker, workspace, timeout, own, admitted, recovery=recovery, snapshot=tasks)
+                raise
+            for room, error in failures.items():
+                trace_event("matrix.backfill.failed", room_id=room, error=str(error)[:1024])
+            sources = pending_sources(snapshot)
+            if not reported_ready:
+                subprocess.run(["agt","worker","report-ready","--name",os.getenv("AGENTTEAMS_WORKER_CR_NAME",worker)],check=True)
+                reported_ready = True
+            recover_tasks(client, None, worker, workspace, timeout, own, admitted, recovery=recovery, snapshot=tasks,
+                          on_scan=recovery_scanned, source_events=[e for e in sources if e["intent"]=="task_notification" and not e["native_committed"]])
+            for source in sources:
+                if source["intent"] == "message":
+                    try:
+                        direct = direct_member(client, source, own, rooms, agents)
+                        recover_message(client, matrix, sessions, source, own, agents, worker, workspace, timeout,
+                            poll_control=(lambda identity: direct_controls(source, identity)) if direct else None)
+                    except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as error:
+                        trace_event("inference.interrupted", event_id=source["event_id"], error=str(error)[:1024])
+        except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as error:
+            trace_event("matrix.failed", error=str(error)[:1024])
+            stop.wait(2)
+    return 0
+
+
 def main() -> int:
     worker_name = required_env("AGENTTEAMS_WORKER_NAME")
     runtime_path = Path(required_env("TEAMHARNESS_RUNTIME_CONFIG"))
@@ -698,15 +959,19 @@ def main() -> int:
     if not room_types:
         raise RuntimeError("runtime.yaml contains no personalRoomId or teamRoomId")
 
+    from task_recovery import enabled
+    client = MatrixClient(homeserver, token)
+    threading.Thread(target=serve_health, name="health", daemon=True).start()
+    if enabled():
+        return run_managed_worker(client, worker_name, runtime_path, workspace,
+            int(os.getenv("AGENTTEAMS_DSH_TASK_TIMEOUT_SECONDS", "3600")), own_user_id, STOP)
     state_path = runtime_path.parent / "matrix-bridge-state.json"
     state = BridgeState.load(state_path)
     legacy_cursor_path = runtime_path.parent / "matrix-next-batch"
     if state.next_batch is None and legacy_cursor_path.exists():
         state.next_batch = legacy_cursor_path.read_text(encoding="utf-8").strip()
     since = state.next_batch
-    client = MatrixClient(homeserver, token)
     admitted_tasks = set()
-    threading.Thread(target=serve_health, name="health", daemon=True).start()
     recover_tasks(client, state, worker_name, workspace,
         int(os.getenv("AGENTTEAMS_DSH_TASK_TIMEOUT_SECONDS", "3600")), own_user_id, admitted_tasks)
 
