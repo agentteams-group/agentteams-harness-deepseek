@@ -377,6 +377,7 @@ def run_dsh(
     room_id: str = "",
     sender: str = "",
     source_event_ids: list[str] | None = None,
+    identity: dict | None = None, source_key: str = "", attach_only: bool = False,
 ) -> str:
     environment = os.environ.copy()
     runtime_path = environment.get("TEAMHARNESS_RUNTIME_CONFIG")
@@ -403,6 +404,9 @@ def run_dsh(
             "TEAMHARNESS_SESSION_SOURCE_EVENT_IDS": json.dumps(source_event_ids or [event_id]),
         }
     )
+    if identity:
+        environment.update(TEAMHARNESS_EXECUTION_IDENTITY=json.dumps(identity), TEAMHARNESS_MATRIX_SOURCE_KEY=source_key,
+            TEAMHARNESS_SOURCE_EVENT_ID=(source_event_ids or [""])[0], TEAMHARNESS_DSH_ATTACH_ONLY=str(attach_only).lower())
     trace_event("inference.begin", event_id=event_id, room_id=room_id, session_id=session_id, attempt=attempt, layer="agent_turn")
     try:
         return _execute_dsh(task, workspace, timeout_seconds, environment, poll_control, event_id, session_id)
@@ -506,22 +510,28 @@ def publish_task_reply(client, recovery, task, team, own_user_id, text):
 
 
 def recover_tasks(client, state, worker_name, workspace, timeout_seconds, own_user_id, admitted,
-                  *, source_events=()):
+                  *, source_events=(), recovery=None, snapshot=None, on_scan=None):
     from task_recovery import Recovery, RecoveryConflict, enabled
     from worker_matrix_state import WorkerMatrix
     from worker_sessions import WorkerSessions
     if not enabled():
         return
-    recovery = Recovery(device_delivery=True)
-    WorkerMatrix("deepseek-harness", recovery=recovery).start()
+    if recovery is None:
+        recovery = Recovery(device_delivery=True)
+        WorkerMatrix("deepseek-harness", recovery=recovery).start()
     sessions = WorkerSessions("deepseek-harness", recovery=recovery)
-    snapshot = recovery.discover()
+    snapshot = snapshot or recovery.discover()
+    claims = []
     for entry in snapshot["tasks"]:
         task_id, team = entry["task"]["task_id"], entry["team_id"]
         try:
             claimed = recovery.claim(snapshot, entry)
         except RecoveryConflict:
             continue
+        claims.append((task_id, team, claimed))
+    if on_scan:
+        on_scan()
+    for task_id, team, claimed in claims:
         task = claimed["task"]
         if task["execution"]["state"] == "needs_verification":
             continue
@@ -536,7 +546,7 @@ def recover_tasks(client, state, worker_name, workspace, timeout_seconds, own_us
             if task is None:
                 continue
         admission = (team, task_id, task["execution"]["generation"])
-        if task["status"] == "submitted" or admission in admitted:
+        if task["status"] == "submitted":
             continue
         key = team + "/" + task_id
         work = {"kind": "task", "team_id": team, "task_id": task_id}
@@ -549,10 +559,23 @@ def recover_tasks(client, state, worker_name, workspace, timeout_seconds, own_us
         source = next((event for event in source_events
             if event.get("room_id") == task["room_id"]
             and event.get("coordination_session", "").startswith("coordination-task:" + task_id + ":")), None)
-        event_id = source["event_id"] if source else "recovery:" + key + ":" + str(admission[2])
+        attach_only = admission in admitted
+        source_key = (source or {}).get("source_key", "")
+        if attach_only and not (source_key and resume):
+            continue
+        event_id = "recovery:" + key + ":" + str(admission[2])
         kwargs = {"session_id": session_id, "resume": resume, "event_id": event_id, "attempt": 1,
             "room_id": task["room_id"], "sender": source["sender"] if source else own_user_id,
-            "source_event_ids": [source["event_id"]] if source else []}
+            "source_event_ids": [source["event_id"]] if source else [],
+            "source_key": source_key, "attach_only": attach_only, "identity": {"team_id": team, "task_id": task_id,
+                **{field: task["execution"][field] for field in ("generation", "instance_id", "process_id")}}}
+        if attach_only:
+            run_dsh("", workspace, timeout_seconds, **kwargs)
+            sync_sessions(worker_name)
+            digest = native_session_digest(session_id)
+            if digest:
+                sessions.remember(work, view, task["execution"], session_id, digest, int(time.time()) + 86400)
+            continue
         text = recovery.resume_text({**task, "team_id": team, "spec": claimed["spec"]})
         # Reserve before execution. An unknown tool failure must not enter the
         # ordinary Matrix event retry loop or start another turn in this boot.

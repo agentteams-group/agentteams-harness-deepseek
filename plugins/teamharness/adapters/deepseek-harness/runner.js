@@ -8,6 +8,7 @@ import { executeAttempt } from './turn.js'
 import { checkpointInput } from './session-receipt.js'
 import { installMatrixInteractions } from './matrix-interactions.js'
 import { runtimeRecord } from './runtime-logging.js'
+import { checkExecution, commitMatrixSource, installExecutionGuard, recoveryCall } from './managed-native.js'
 
 
 export const name = 'agentteams-headless-runner'
@@ -88,6 +89,35 @@ async function run(ctx, config, io) {
     ctx.get('permissionPresets').set(agent.session, process.env.DSH_PERMISSION_MODE)
   }
 
+  const identity = JSON.parse(process.env.TEAMHARNESS_EXECUTION_IDENTITY || 'null')
+  const sourceKey = process.env.TEAMHARNESS_MATRIX_SOURCE_KEY
+  if (identity && sourceKey) {
+    const source = recoveryCall('matrix.native.get', { event_key: sourceKey }).input
+    const current = checkExecution(identity)
+    if (identity.event_key ? identity.event_key !== sourceKey :
+        source.work?.task_id !== identity.task_id || source.work?.team_id !== identity.team_id ||
+        source.room_id !== current.task.room_id) throw new Error('Matrix source belongs to a different execution')
+    const body = source.input
+    if (source.room_id !== process.env.TEAMHARNESS_MATRIX_ROOM_ID || source.event_id !== process.env.TEAMHARNESS_SOURCE_EVENT_ID ||
+        body.sender !== process.env.TEAMHARNESS_MATRIX_SENDER) throw new Error('Unmatched Matrix source')
+    const native = userMessage(JSON.stringify({ room_id: source.room_id, event_id: source.event_id, ...body }), messageId(source.event_id, 1))
+    const existing = agent.session.events.find(event => event.type === 'user/message' && event.data.id === native.id)
+    if (existing && JSON.stringify(existing.data.content) !== JSON.stringify(native.content)) throw new Error('Different native Matrix source')
+    if (!existing) agent.session.append('user/message', native, { surfaceOp: 'append' })
+    const row = existing || agent.session.events.at(-1)
+    await checkpointInput(agent.session, row, {
+      id: native.id, eventId: source.event_id, roomId: source.room_id, workspace: process.env.HOME,
+      flush: async session => {
+        await sessions.flush(session)
+        await commitMatrixSource(session, row, ctx.get('sessionPersistence'), sourceKey, source)
+      },
+    })
+    if (process.env.TEAMHARNESS_DSH_ATTACH_ONLY === 'true') {
+      io.stdout.write('attached\n')
+      io.exit(0)
+      return
+    }
+  }
   const id = messageId(config.eventId, config.attempt)
   const receipt = {
     id, eventId: config.eventId, roomId: process.env.TEAMHARNESS_MATRIX_ROOM_ID,
@@ -95,17 +125,18 @@ async function run(ctx, config, io) {
     sourceEventIds: JSON.parse(process.env.TEAMHARNESS_SESSION_SOURCE_EVENT_IDS || '[]'),
   }
   let receiptCheckpoint = Promise.resolve()
+  if (identity) installExecutionGuard(ctx, agent, identity, () => receiptCheckpoint)
   ctx.on('session/event', (session, event) => {
     if (session === agent.session && process.env.AGENTTEAMS_LOG_CAPTURED === '1') {
       const record = runtimeRecord(event)
       if (record) io.stderr.write('[agentteams-native-event] ' + JSON.stringify(record) + '\n')
     }
-    if (session !== agent.session || event.type !== 'user/message' || event.data.id !== id) return
+    if (identity || session !== agent.session || event.type !== 'user/message' || event.data.id !== id) return
     receiptCheckpoint = Promise.resolve().then(() => checkpointInput(session, event, receipt))
     return receiptCheckpoint
   })
   const existingInput = agent.session.events.find(event => event.type === 'user/message' && event.data.id === id)
-  if (existingInput) await checkpointInput(agent.session, existingInput, receipt)
+  if (existingInput && !identity) await checkpointInput(agent.session, existingInput, receipt)
   const outcome = await executeAttempt({
     getEvents: () => agent.session.events,
     id,

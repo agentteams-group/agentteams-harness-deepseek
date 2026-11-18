@@ -79,7 +79,7 @@ export TEAMHARNESS_DSH_MODEL="$(python3 /opt/agentteams/scripts/runtime_env.py m
 mkdir -p "${DSH_HOME}"
 cp -a /opt/agentteams/dsh-template/. "${DSH_HOME}/"
 mkdir -p "${DSH_HOME}/sessions" "${TEAMHARNESS_WORKSPACE}"
-if jq -e 'any((.rooms // {})[]; .ready == true)' "${RUNTIME_DIR}/matrix-bridge-state.json" >/dev/null 2>&1; then
+if ! PYTHONPATH=/opt/agentteams/scripts/lib python3 -c 'from task_recovery import enabled; raise SystemExit(not enabled())' && jq -e 'any((.rooms // {})[]; .ready == true)' "${RUNTIME_DIR}/matrix-bridge-state.json" >/dev/null 2>&1; then
     log "Restoring required DeepSeek Harness sessions"
     RETRY=0
     until mc mirror "${REMOTE_WORKER}/.dsh/sessions/" "${DSH_HOME}/sessions/" --overwrite >/dev/null 2>&1; do
