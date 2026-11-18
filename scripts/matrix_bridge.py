@@ -492,17 +492,14 @@ def native_session_digest(session_id):
 
 
 def publish_task_reply(client, recovery, task, team, own_user_id, text):
-    from task_recovery import RecoveryConflict
+    from worker_matrix_delivery import confirm_bound
     from worker_matrix_raw import publish_raw_saved
 
     identity = task["execution"]
     task_id = task["task_id"]
     def bind(checkpoint):
         saved = recovery.checkpoint(task_id, team, checkpoint)["execution"]
-        if (saved.get("state") != "active" or saved.get("runtime") != "deepseek-harness"
-                or any(saved.get(field) != identity[field] for field in ("generation", "instance_id", "process_id"))
-                or saved.get("checkpoint") != checkpoint):
-            raise RecoveryConflict("Task reply device binding lost execution ownership")
+        confirm_bound(saved, identity, "deepseek-harness", checkpoint)
     event_id = publish_raw_saved(client, task["room_id"], text, identity["checkpoint"], own_user_id, bind,
         content={"org.agentteams.progress_only": True}, legacy_transaction_id=matrix_transaction_id)
     return recovery.delivered(task_id, team, event_id)

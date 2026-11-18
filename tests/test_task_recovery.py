@@ -108,6 +108,22 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual(self.client.send_content.call_args.args[1]["body"], "saved report")
         self.recovery.delivered.assert_called_once_with("stable", "team", "$reply")
 
+    def test_server_stamps_device_binding_before_native_delivery(self):
+        self.task["status"] = "submitted"
+        self.saved_result("saved report")
+        self.pending["reply_attempt"] = {"state": "ready"}
+        self.task["execution"]["checkpoint"] = self.pending
+        def checkpoint(_task, _team, cp):
+            saved = {**cp, "saved_at": "2030-01-02T03:04:05Z"}
+            self.task["execution"]["checkpoint"] = saved
+            return self.task
+        self.recovery.checkpoint.side_effect = checkpoint
+        self.recover()
+        self.recovery.checkpoint.assert_called_once()
+        self.client.send_content.assert_called_once()
+        self.recovery.delivered.assert_called_once_with("stable", "team", "$reply")
+        self.run.assert_not_called()
+
     def test_actual_assignment_retains_its_native_read_source(self):
         source = {"room_id": "!room:test", "event_id": "$assignment", "sender": "@leader:test", "coordination_session": "coordination-task:stable:delivery"}
         self.recover(source_events=[source])
