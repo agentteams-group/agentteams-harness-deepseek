@@ -108,9 +108,10 @@ class ManagedMatrixTest(unittest.TestCase):
                 patch("worker_matrix_state.WorkerMatrix", return_value=self.matrix), patch("worker_matrix_raw.RawWorkerSync", side_effect=receiver), \
                 patch.object(bridge, "refresh_runtime_config"), patch.object(bridge.subprocess, "run"), \
                 patch("worker_handoff.recovery_scanned", side_effect=lambda: order.append("scanned")), \
+                patch.object(bridge, "trace_event", side_effect=lambda event, **_: order.append(event)), \
                 patch.object(bridge, "recover_tasks", side_effect=tasks), patch.object(bridge, "direct_member", return_value=False), \
                 patch.object(bridge, "recover_message", side_effect=lambda *args, **kwargs: order.append("message") or stop.set()):
             bridge.run_managed_worker(self.client, "agent", runtime, self.workspace, 10, "@agent", stop)
         self.matrix.start.assert_called_once()
-        self.assertEqual(order, ["discover", "sync", "claim", "scanned", "message"])
+        self.assertEqual(order, ["discover", "sync", "claim", "scanned", "runtime.ready", "message"])
         self.assertFalse((self.workspace / "matrix-bridge-state.json").exists())

@@ -927,6 +927,17 @@ def run_managed_worker(client, worker, runtime_path, workspace, timeout, own, st
         return False
 
     reported_ready = False
+
+    def ready_after_scan():
+        nonlocal reported_ready
+        if reported_ready:
+            return
+        subprocess.run(["agt", "worker", "report-ready", "--name",
+                        os.getenv("AGENTTEAMS_WORKER_CR_NAME", worker)], check=True)
+        recovery_scanned()
+        trace_event("runtime.ready", evidence="matrix_sync_and_task_scan")
+        reported_ready = True
+
     while not stop.is_set():
         try:
             refresh_runtime_config(worker, runtime_path)
@@ -953,11 +964,8 @@ def run_managed_worker(client, worker, runtime_path, workspace, timeout, own, st
             for room, error in failures.items():
                 trace_event("matrix.backfill.failed", room_id=room, error=str(error)[:1024])
             sources = pending_sources(snapshot)
-            if not reported_ready:
-                subprocess.run(["agt","worker","report-ready","--name",os.getenv("AGENTTEAMS_WORKER_CR_NAME",worker)],check=True)
-                reported_ready = True
             recover_tasks(client, None, worker, workspace, timeout, own, admitted, recovery=recovery, snapshot=tasks,
-                          on_scan=recovery_scanned, source_events=[e for e in sources if e["intent"]=="task_notification" and not e["native_committed"]])
+                          on_scan=ready_after_scan, source_events=[e for e in sources if e["intent"]=="task_notification" and not e["native_committed"]])
             for source in sources:
                 if source["intent"] == "message":
                     try:
