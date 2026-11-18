@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from bridge_state import BridgeState
-from runtime_env import desired_model, deepseek_base_url
+from runtime_env import desired_model, deepseek_base_url, worker_environment
 from matrix_channel import (
     MatrixClient,
     matrix_events,
@@ -380,7 +380,10 @@ def run_dsh(
 ) -> str:
     environment = os.environ.copy()
     runtime_path = environment.get("TEAMHARNESS_RUNTIME_CONFIG")
-    if runtime_path:
+    projection = worker_environment(Path(runtime_path), environment.get("AGENTTEAMS_WORKER_NAME", "")) if runtime_path else {}
+    if projection:
+        environment.update(projection)
+    if runtime_path and "DEEPSEEK_BASE_URL" not in projection:
         model, gateway = desired_model(Path(runtime_path))
         if model:
             environment["TEAMHARNESS_DSH_MODEL"] = model
@@ -388,6 +391,7 @@ def run_dsh(
             environment.get("DEEPSEEK_BASE_URL", ""),
             environment.get("AGENTTEAMS_AI_GATEWAY_URL", ""), gateway,
         )
+    environment.pop("AGENTTEAMS_WORKER_GATEWAY_KEY", None)
     environment.update(
         {
             "TEAMHARNESS_DSH_SESSION_ID": session_id,
@@ -473,22 +477,64 @@ def _execute_dsh(task, workspace, timeout_seconds, environment, poll_control, ev
     return answer
 
 
+def native_session_digest(session_id):
+    # DSH rc.2 uses one JSONL log beneath the session's encoded ID. Our
+    # generated ASCII references use only literal, filename-safe characters.
+    if not re.fullmatch(r"session-task-[0-9a-f]{32}", session_id):
+        return None
+    root = Path(required_env("DSH_HOME")) / "sessions"
+    logs = [p for p in root.glob("*/" + session_id + "/session.jsonl*")
+            if p.name in {"session.jsonl", "session.jsonl.zstd"} and p.is_file()]
+    if len(logs) != 1:
+        return None
+    with logs[0].open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def publish_task_reply(client, recovery, task, team, own_user_id, text):
+    from task_recovery import RecoveryConflict
+    from worker_matrix_raw import publish_raw_saved
+
+    identity = task["execution"]
+    task_id = task["task_id"]
+    def bind(checkpoint):
+        saved = recovery.checkpoint(task_id, team, checkpoint)["execution"]
+        if (saved.get("state") != "active" or saved.get("runtime") != "deepseek-harness"
+                or any(saved.get(field) != identity[field] for field in ("generation", "instance_id", "process_id"))
+                or saved.get("checkpoint") != checkpoint):
+            raise RecoveryConflict("Task reply device binding lost execution ownership")
+    event_id = publish_raw_saved(client, task["room_id"], text, identity["checkpoint"], own_user_id, bind,
+        content={"org.agentteams.progress_only": True}, legacy_transaction_id=matrix_transaction_id)
+    return recovery.delivered(task_id, team, event_id)
+
+
 def recover_tasks(client, state, worker_name, workspace, timeout_seconds, own_user_id, admitted,
                   *, source_events=()):
-    from task_recovery import Recovery, enabled
+    from task_recovery import Recovery, RecoveryConflict, enabled
+    from worker_matrix_state import WorkerMatrix
+    from worker_sessions import WorkerSessions
     if not enabled():
         return
-    recovery = Recovery()
+    recovery = Recovery(device_delivery=True)
+    WorkerMatrix("deepseek-harness", recovery=recovery).start()
+    sessions = WorkerSessions("deepseek-harness", recovery=recovery)
     snapshot = recovery.discover()
     for entry in snapshot["tasks"]:
         task_id, team = entry["task"]["task_id"], entry["team_id"]
-        claimed = recovery.claim(snapshot, entry)
+        try:
+            claimed = recovery.claim(snapshot, entry)
+        except RecoveryConflict:
+            continue
         task = claimed["task"]
+        if task["execution"]["state"] == "needs_verification":
+            continue
+        if (task["execution"]["state"] != "active" or task["execution"]["runtime"] != "deepseek-harness"
+                or task["execution"]["instance_id"] != snapshot["instance_id"]
+                or task["execution"]["process_id"] != recovery.process):
+            continue
         cp = task["execution"].get("checkpoint") or {}
         if cp.get("delivery") == "pending":
-            event_id = client.send_text(task["room_id"], claimed["saved_result"],
-                transaction_key=cp["reply_txn"], progress_only=True)
-            recovery.delivered(task_id, team, event_id)
+            publish_task_reply(client, recovery, task, team, own_user_id, claimed["saved_result"])
             task = recovery.current(task_id, team)
             if task is None:
                 continue
@@ -496,11 +542,16 @@ def recover_tasks(client, state, worker_name, workspace, timeout_seconds, own_us
         if task["status"] == "submitted" or admission in admitted:
             continue
         key = team + "/" + task_id
-        marker = state.data.get("task_sessions", {}).get(key)
-        resume = recovery.session_usable(marker, task, "deepseek-harness")
-        session_id = marker["session_id"] if resume else "session-task-" + uuid.uuid4().hex
+        work = {"kind": "task", "team_id": team, "task_id": task_id}
+        view = sessions.load(work)
+        if view["generation"] != admission[2] or view["checkpoint_digest"] != recovery.digest(cp or None):
+            continue
+        cached = (view.get("cache") or {}).get("native_ref", "")
+        resume = sessions.usable(view, cached, native_session_digest(cached)) if cached else False
+        session_id = cached if resume else "session-task-" + uuid.uuid4().hex
         source = next((event for event in source_events
-            if event.get("coordination_session", "").startswith("coordination-task:" + task_id + ":")), None)
+            if event.get("room_id") == task["room_id"]
+            and event.get("coordination_session", "").startswith("coordination-task:" + task_id + ":")), None)
         event_id = source["event_id"] if source else "recovery:" + key + ":" + str(admission[2])
         kwargs = {"session_id": session_id, "resume": resume, "event_id": event_id, "attempt": 1,
             "room_id": task["room_id"], "sender": source["sender"] if source else own_user_id,
@@ -525,13 +576,12 @@ def recover_tasks(client, state, worker_name, workspace, timeout_seconds, own_us
             raise
         cp = saved["execution"]["checkpoint"]
         if cp.get("delivery") != "delivered":
-            reply_id = client.send_text(task["room_id"], answer, transaction_key=cp["reply_txn"], progress_only=True)
-            saved = recovery.delivered(task_id, team, reply_id)
-        state.data.setdefault("task_sessions", {})[key] = {"runtime": "deepseek-harness",
-            "session_id": session_id, "expires_at": time.time()+86400,
-            "checkpoint_digest": recovery.digest(saved["execution"]["checkpoint"])}
-        state.save()
-        push_runtime_state(worker_name, state.path)
+            saved = publish_task_reply(client, recovery, {**task, "execution": saved["execution"]}, team, own_user_id, answer)
+        digest = native_session_digest(session_id)
+        if digest and task["status"] != "submitted":
+            view = sessions.load(work)
+            if view["checkpoint_digest"] == recovery.digest(saved["execution"]["checkpoint"]):
+                sessions.remember(work, view, task["execution"], session_id, digest, int(time.time()) + 86400)
 
 
 def direct_member(client, event, own_user_id, room_types, agent_user_ids):
@@ -616,9 +666,10 @@ def serve_health() -> None:
 
 def main() -> int:
     worker_name = required_env("AGENTTEAMS_WORKER_NAME")
+    runtime_path = Path(required_env("TEAMHARNESS_RUNTIME_CONFIG"))
+    os.environ.update(worker_environment(runtime_path, worker_name))
     homeserver = required_env("AGENTTEAMS_MATRIX_URL")
     token = required_env("AGENTTEAMS_WORKER_MATRIX_TOKEN")
-    runtime_path = Path(required_env("TEAMHARNESS_RUNTIME_CONFIG"))
     workspace = Path(required_env("TEAMHARNESS_WORKSPACE"))
     workspace.mkdir(parents=True, exist_ok=True)
     matrix_domain = required_env("AGENTTEAMS_MATRIX_DOMAIN")
