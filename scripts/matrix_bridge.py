@@ -680,6 +680,7 @@ def deliver_managed_message(client, matrix, claim, source, own, agents):
 
 def recover_message(client, matrix, sessions, source, own, agents, worker, workspace, timeout, poll_control=None):
     from task_recovery import Recovery, RecoveryConflict
+    from worker_matrix_raw import require_unencrypted_room
 
     key = source["source_key"]
     claim = matrix.message_claim(key)
@@ -729,7 +730,9 @@ def recover_message(client, matrix, sessions, source, own, agents, worker, works
                 "arguments": {"path": relative, "sha256": digest}}
         op = matrix.message_begin_tools(identity, [call])
         sync_output_paths(worker, workspace, [relative])
-        event = client.send_file(source["room_id"], path, source["event_id"], key + ":" + call["id"])
+        check_room = lambda: require_unencrypted_room(client, source["room_id"])
+        check_room()
+        event = client.send_file(source["room_id"], path, source["event_id"], key + ":" + call["id"], before_send=check_room)
         if not isinstance(event, str) or not event.startswith("$"):
             raise RecoveryConflict("Matrix file delivery is unconfirmed")
         matrix.message_finish_tools(identity, op, [{"id": call["id"], "content": {"event_id": event, "sha256": digest, "path":relative}}])
@@ -862,6 +865,7 @@ def run_managed_worker(client, worker, runtime_path, workspace, timeout, own, st
             room = row["room_id"]
             if room not in joined or snapshot["state"]["rooms"].get(room, {}).get("gaps"):
                 continue
+            receiver.require_room(room)
             parsed = managed_matrix_event(row, rooms, own, agents, transport)
             if parsed is None or parsed[0] != row["intent"]:
                 continue
@@ -956,10 +960,9 @@ def main() -> int:
     matrix_domain = required_env("AGENTTEAMS_MATRIX_DOMAIN")
     own_user_id, room_types = runtime_matrix_context(runtime_path, worker_name, matrix_domain)
     agent_user_ids = runtime_agent_user_ids(runtime_path)
-    if not room_types:
-        raise RuntimeError("runtime.yaml contains no personalRoomId or teamRoomId")
-
     from task_recovery import enabled
+    if not room_types and not enabled():
+        raise RuntimeError("runtime.yaml contains no personalRoomId or teamRoomId")
     client = MatrixClient(homeserver, token)
     threading.Thread(target=serve_health, name="health", daemon=True).start()
     if enabled():

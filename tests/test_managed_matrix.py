@@ -69,6 +69,17 @@ class ManagedMatrixTest(unittest.TestCase):
         self.assertEqual(timeline, [("save", self.identity, "answer"), ("send",)])
         self.sessions.remember.assert_not_called()
 
+    def test_room_encrypted_after_upload_blocks_native_file_event(self):
+        from matrix_channel import MatrixClient
+        native = MatrixClient("http://unused", "unused")
+        native.upload_media = Mock(return_value=("mxc://hs/id", "text/plain", 2))
+        native.send_content = Mock()
+        with self.assertRaises(RecoveryConflict):
+            native.send_file("!dm", self.workspace / "note.txt", "$source", "stable",
+                before_send=Mock(side_effect=RecoveryConflict("room now requires E2EE")))
+        native.upload_media.assert_called_once()
+        native.send_content.assert_not_called()
+
     def test_stale_session_revision_prevents_inference(self):
         self.sessions.load.return_value["checkpoint_digest"] = "old"
         with patch.object(bridge, "run_dsh") as native, self.assertRaises(RecoveryConflict):
