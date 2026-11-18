@@ -44,3 +44,35 @@ test('native DSH appends a late source without inference and proves disk readbac
     await rm(root, {recursive:true, force:true})
   }
 })
+
+test('DSH tool dispatch reserves before a real body and keeps ambiguous results for verification', async () => {
+  const { ToolRuntime, defineContentToolFixture } = await import('@deepseek-ai/dsh-tools')
+  const { SystemPrompt } = await import('@deepseek-ai/dsh-system-prompt')
+  const { installExecutionGuard } = await import(process.env.AGENTTEAMS_MANAGED_NATIVE_MODULE ??
+    new URL('../../plugins/teamharness/adapters/deepseek-harness/managed-native.js', import.meta.url).href)
+  const ctx = new Context()
+  try {
+    await ctx.plugin(SystemPrompt).await()
+    await ctx.plugin(ToolRuntime, { mode: 'native' }).await()
+    const tools = ctx.get('tools'), effects = []
+    installExecutionGuard(ctx, undefined, {event_key:'source'}, async () => {}, (action, fields) => {
+      if (action.endsWith('begin_tools')) { effects.push('reserve:' + fields.calls[0].id); return 'op' }
+      effects.push('confirm:' + fields.results[0].id)
+    })
+    tools.register(defineContentToolFixture({
+      name:'checked_write',description:'Fixture effect', parameters:{},
+      async execute(_args, execution) {
+        effects.push('body:' + execution.callId)
+        if (execution.callId === 'uncertain') throw new Error('Lost upstream response')
+        return [{type:'text',text:'written'}]
+      },
+    }))
+    const run = callId => tools.execute({callId, name:'checked_write', arguments:{}, signal:new AbortController().signal})
+    assert.equal((await run('known')).isError, false)
+    assert.equal((await run('uncertain')).isError, true)
+    assert.deepEqual(effects, ['reserve:known','body:known','confirm:known','reserve:uncertain','body:uncertain'])
+  } finally {
+    await ctx.registry.delete(ToolRuntime)
+    await ctx.registry.delete(SystemPrompt)
+  }
+})
