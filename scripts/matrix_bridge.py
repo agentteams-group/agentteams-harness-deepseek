@@ -8,8 +8,10 @@ import json
 import os
 import re
 import signal
+import shutil
 import subprocess
 import threading
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -678,9 +680,9 @@ def deliver_managed_message(client, matrix, claim, source, own, agents):
     return matrix.message_delivered(identity, event)
 
 
-def recover_message(client, matrix, sessions, source, own, agents, worker, workspace, timeout, poll_control=None):
+def recover_message(client, matrix, sessions, source, own, agents, worker, workspace, timeout, *, admit, poll_control=None):
     from task_recovery import Recovery, RecoveryConflict
-    from worker_matrix_raw import require_unencrypted_room
+    from worker_matrix_raw import raw_room_history, require_unencrypted_room
 
     key = source["source_key"]
     claim = matrix.message_claim(key)
@@ -700,6 +702,9 @@ def recover_message(client, matrix, sessions, source, own, agents, worker, works
     if source["kind"] != "text":
         prompt, _ = materialize_attachment(source, client, workspace, int(os.getenv("AGENTTEAMS_MATRIX_ATTACHMENT_MAX_BYTES", 25 * 1024 * 1024)))
         task += "\n" + prompt
+    def new_prompt():
+        history = raw_room_history(client, matrix, own, source["room_id"], source["event_id"], admit)
+        return task + ("\nEarlier Matrix messages:\n" + json.dumps(history, ensure_ascii=False) if history else "")
     def stopped():
         from task_recovery import RecoveryUnavailable
         try:
@@ -714,32 +719,50 @@ def recover_message(client, matrix, sessions, source, own, agents, worker, works
         room_id=source["room_id"], sender=source["sender"], source_event_ids=[source["event_id"]],
         event_id=f"recovery:{key}:{identity['generation']}:{claim['checkpoint_digest']}", attempt=1, poll_control=stopped)
     try:
-        text = run_dsh(task, workspace, timeout, **kwargs)
+        text = run_dsh(task if reuse else new_prompt(), workspace, timeout, **kwargs)
     except MissingNativeSession:
         if not reuse:
             raise
         ref = "session-message-" + uuid.uuid4().hex
-        text = run_dsh(task, workspace, timeout, **{**kwargs, "session_id":ref, "resume":False})
+        text = run_dsh(new_prompt(), workspace, timeout, **{**kwargs, "session_id":ref, "resume":False})
     matrix.message_current(identity)
     sync_sessions(worker)
-    for relative in changed_outbox_files(workspace, before):
-        path = workspace_output_path(workspace, relative)
-        with path.open("rb") as stream:
-            digest = hashlib.file_digest(stream, "sha256").hexdigest()
-        call = {"id": "outbox:" + digest + ":" + relative, "name": "send_file",
-                "arguments": {"path": relative, "sha256": digest}}
-        op = matrix.message_begin_tools(identity, [call])
-        sync_output_paths(worker, workspace, [relative])
-        check_room = lambda: require_unencrypted_room(client, source["room_id"])
-        check_room()
-        event = client.send_file(source["room_id"], path, source["event_id"], key + ":" + call["id"], before_send=check_room)
-        if not isinstance(event, str) or not event.startswith("$"):
-            raise RecoveryConflict("Matrix file delivery is unconfirmed")
-        matrix.message_finish_tools(identity, op, [{"id": call["id"], "content": {"event_id": event, "sha256": digest, "path":relative}}])
-    if text.strip() == "NO_REPLY":
+    outputs = changed_outbox_files(workspace, before)
+    if not outputs and text.strip() == "NO_REPLY":
         matrix.message_cancel(identity)
         return
-    saved = matrix.message_save_reply(identity, text)
+    if outputs:
+        account = client.request("GET", "/_matrix/client/v3/account/whoami")
+        if account.get("user_id") != own or not account.get("device_id"):
+            raise RecoveryConflict("Matrix attachment credential belongs to another Worker")
+        room = source["room_id"]
+        require_unencrypted_room(client, room)
+        with tempfile.TemporaryDirectory() as directory:
+            calls, files = [], []
+            for relative in outputs:
+                original = workspace_output_path(workspace, relative)
+                copy = Path(directory) / str(len(files)) / original.name
+                copy.parent.mkdir()
+                shutil.copyfile(original, copy)
+                with copy.open("rb") as stream:
+                    digest = hashlib.file_digest(stream, "sha256").hexdigest()
+                calls.append({"id": relative, "name": "matrix.send_file", "arguments": {"room": room, "sha256": digest}})
+                files.append(copy)
+            operation = matrix.message_begin_tools(identity, calls, reply=text, output_bytes=(f.read_bytes() for f in files))
+            def before_send():
+                matrix.message_pending_tools(identity, operation)
+                require_unencrypted_room(client, room)
+            receipts = []
+            for call, path in zip(calls, files):
+                before_send()
+                mc("cp", str(path), output_remote_path(worker, call["id"]))
+                event = client.send_file(room, path, source["event_id"], key + ":file:" + call["id"], before_send=before_send)
+                if not isinstance(event, str) or not event.startswith("$"):
+                    raise RecoveryConflict("Matrix file delivery is unconfirmed")
+                receipts.append({"id": call["id"], "content": {**call["arguments"], "event_id": event}})
+            saved = matrix.message_finish_tools(identity, operation, receipts, deliver_result=True)
+    else:
+        saved = matrix.message_save_reply(identity, text)
     delivered = deliver_managed_message(client, matrix, saved, source, own, agents)
     digest = native_session_digest(ref)
     if digest:
@@ -940,6 +963,7 @@ def run_managed_worker(client, worker, runtime_path, workspace, timeout, own, st
                     try:
                         direct = direct_member(client, source, own, rooms, agents)
                         recover_message(client, matrix, sessions, source, own, agents, worker, workspace, timeout,
+                            admit=lambda room, raw: classify(room, raw) == ("message", None),
                             poll_control=(lambda identity: direct_controls(source, identity)) if direct else None)
                     except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as error:
                         trace_event("inference.interrupted", event_id=source["event_id"], error=str(error)[:1024])

@@ -25,6 +25,7 @@ class ManagedMatrixTest(unittest.TestCase):
                       "execution": {"checkpoint": {}}, "checkpoint_digest": "cp3", "resume_text": "continue two"}
         self.matrix.message_claim.return_value = self.claim
         self.sessions, self.client = Mock(), Mock()
+        self.client.request.return_value = {"event": {"room_id": "!dm", "event_id": "$source"}, "events_before": []}
         self.sessions.load.return_value = {"generation": 3, "checkpoint_digest": "cp3"}
 
     def test_projected_sender_policy_before_discovery_and_control_classification(self):
@@ -39,7 +40,7 @@ class ManagedMatrixTest(unittest.TestCase):
         self.assertIsNone(classify({}))
 
     def recover(self):
-        return bridge.recover_message(self.client, self.matrix, self.sessions, self.native, "@agent", set(), "worker", self.workspace, 10)
+        return bridge.recover_message(self.client, self.matrix, self.sessions, self.native, "@agent", set(), "worker", self.workspace, 10, admit=lambda *_: True)
 
     def test_saved_result_and_unknown_side_effect_do_not_start_dsh(self):
         native = self.enterContext(patch.object(bridge, "run_dsh"))
