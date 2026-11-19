@@ -330,6 +330,7 @@ class MatrixClient:
         transaction_key: str,
         mentioned_user_ids: list[str] | None = None,
         auto_source_mention: bool = False,
+        *, before_send=None,
     ) -> str:
         content_uri, mimetype, size = self.upload_media(path)
         msgtype = "m.image" if mimetype.startswith("image/") else "m.file"
@@ -346,4 +347,6 @@ class MatrixClient:
             content["m.mentions"] = {"user_ids": mentions}
         if auto_source_mention:
             content["com.agentteams.auto_source_mention"] = True
+        if before_send:
+            before_send()
         return self.send_content(room_id, content, transaction_key)

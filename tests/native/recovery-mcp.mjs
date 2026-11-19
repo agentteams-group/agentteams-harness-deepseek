@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parse } from 'yaml'
 import { scrubbedParentEnv } from '@deepseek-ai/dsh-subprocess'
+import { assertSupportedJsonSchema } from '@deepseek-ai/dsh-tools'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 
@@ -48,10 +49,12 @@ test('native Task MCP retains supervisor ownership and credential-file scope aft
     }
   })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  const python = process.env.TEAMHARNESS_PYTHON
+  assert.ok(python, 'The image must provide the same Python executable as the production adapter')
   Object.assign(process.env, { AGENTTEAMS_PROCESS_ID: execution.process_id, AGENTTEAMS_AUTH_TOKEN_FILE: token,
     AGENTTEAMS_CONTROLLER_URL: `http://127.0.0.1:${server.address().port}`, AGENTTEAMS_AGENT_ROLE: 'worker',
     AGENTTEAMS_PLUGIN_DIR: plugin, TEAMHARNESS_WORKSPACE: root, TEAMHARNESS_RUNTIME_CONFIG: runtime,
-    TEAMHARNESS_PYTHON: '/usr/bin/python3', PYTHONPATH: '/opt/agentteams/scripts/lib' })
+    PYTHONPATH: '/opt/agentteams/scripts/lib' })
   // Use the real adapter's explicit env and the SDK's real scrubber, exactly
   // as its stdio factory does. Credential-shaped file paths are scrubbed too.
   assert.equal(scrubbedParentEnv().AGENTTEAMS_AUTH_TOKEN_FILE, undefined)
@@ -59,11 +62,14 @@ test('native Task MCP retains supervisor ownership and credential-file scope aft
   const envYaml = config.split('        env:\n')[1].split('        failOnStartupError:')[0]
   const env = parse(envYaml, { customTags: [{ tag: 'tag:yaml.org,2002:js',
     resolve: expression => Function('process', `return (${expression})`)(process) }] })
-  const transport = new StdioClientTransport({ command: process.env.TEAMHARNESS_PYTHON, args: ['mcp/server.py'],
+  const transport = new StdioClientTransport({ command: python, args: ['mcp/server.py'],
     cwd: plugin, env: { ...scrubbedParentEnv(), ...env } })
   const client = new Client({ name: 'recovery-native-scope-test', version: '1' })
   try {
     await client.connect(transport)
+    const { tools } = await client.listTools()
+    assert.ok(tools.some(tool => tool.name === 'taskflow'), 'The SDK must discover the Task tool')
+    for (const tool of tools) assertSupportedJsonSchema(tool.inputSchema)
     const result = await client.callTool({ name: 'taskflow', arguments: { action: 'checkpoint_task',
       payload: { task_id: 'stable', checkpoint: { version: 4, completed_steps: ['one'], remaining_steps: ['two'] } } } }, undefined, { timeout: 10000 })
     const body = JSON.parse(result.content.find(item => item.type === 'text').text)

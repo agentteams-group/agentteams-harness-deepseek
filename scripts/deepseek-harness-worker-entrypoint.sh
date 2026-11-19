@@ -12,7 +12,7 @@ if [ "${AGENTTEAMS_MATRIX_E2EE:-0}" = "1" ] || [ "${AGENTTEAMS_MATRIX_E2EE:-}" =
 fi
 
 DSH_LLM_CREDENTIAL="${DEEPSEEK_API_KEY:-${AGENTTEAMS_WORKER_GATEWAY_KEY:-}}"
-if [ -z "${DSH_LLM_CREDENTIAL}" ]; then
+if [ -z "${DSH_LLM_CREDENTIAL}" ] && [ -z "${AGENTTEAMS_CONTROLLER_URL:-}" ]; then
     echo "[agentteams-dsh-worker] ERROR: no LLM credential available; set DEEPSEEK_API_KEY or provide the Controller-issued gateway key" >&2
     exit 1
 fi
@@ -48,14 +48,14 @@ export DSH_HOME="${WORKER_HOME}/.dsh"
 export TEAMHARNESS_RUNTIME_CONFIG="${RUNTIME_CONFIG}"
 export TEAMHARNESS_WORKSPACE="${WORKER_HOME}/workspace"
 export TEAMHARNESS_DSH_SKILL_ROOT="${RUNTIME_DIR}/dsh-skills"
-export TEAMHARNESS_PYTHON="/usr/bin/python3"
+export TEAMHARNESS_PYTHON="${TEAMHARNESS_PYTHON:-/opt/venv/agentteams/bin/python3}"
 export AGENTTEAMS_PLUGIN_DIR="/opt/agentteams/plugins/teamharness"
 export AGENTTEAMS_MATRIX_USER_ID="@${WORKER_NAME}:${AGENTTEAMS_MATRIX_DOMAIN}"
 export DEEPSEEK_API_KEY="${DSH_LLM_CREDENTIAL}"
 if [ "${AGENTTEAMS_YOLO:-}" = "1" ]; then
     export DSH_PERMISSION_MODE="${DSH_PERMISSION_MODE:-danger-full-access}"
 fi
-unset DSH_LLM_CREDENTIAL AGENTTEAMS_WORKER_GATEWAY_KEY
+unset DSH_LLM_CREDENTIAL
 
 log "Pulling controller-projected runtime state"
 RETRY=0
@@ -79,7 +79,7 @@ export TEAMHARNESS_DSH_MODEL="$(python3 /opt/agentteams/scripts/runtime_env.py m
 mkdir -p "${DSH_HOME}"
 cp -a /opt/agentteams/dsh-template/. "${DSH_HOME}/"
 mkdir -p "${DSH_HOME}/sessions" "${TEAMHARNESS_WORKSPACE}"
-if jq -e 'any((.rooms // {})[]; .ready == true)' "${RUNTIME_DIR}/matrix-bridge-state.json" >/dev/null 2>&1; then
+if ! PYTHONPATH=/opt/agentteams/scripts/lib python3 -c 'from task_recovery import enabled; raise SystemExit(not enabled())' && jq -e 'any((.rooms // {})[]; .ready == true)' "${RUNTIME_DIR}/matrix-bridge-state.json" >/dev/null 2>&1; then
     log "Restoring required DeepSeek Harness sessions"
     RETRY=0
     until mc mirror "${REMOTE_WORKER}/.dsh/sessions/" "${DSH_HOME}/sessions/" --overwrite >/dev/null 2>&1; do

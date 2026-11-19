@@ -25,6 +25,7 @@ smoke:
 	docker run --rm --entrypoint python3 -v "$(CURDIR)/tests/headless_smoke.py:/tmp/headless_smoke.py:ro" $(IMAGE):$(VERSION) /tmp/headless_smoke.py
 	docker run --rm --entrypoint node -e AGENTTEAMS_INTERACTIONS_MODULE=/opt/agentteams/plugins/teamharness/adapters/deepseek-harness/matrix-interactions.js -v "$(CURDIR)/tests/native/matrix-interactions.mjs:/opt/agentteams/dsh/test-matrix-interactions.mjs:ro" $(IMAGE):$(VERSION) --test /opt/agentteams/dsh/test-matrix-interactions.mjs
 	docker run --rm --entrypoint node -v "$(CURDIR)/tests/native/recovery-mcp.mjs:/opt/agentteams/dsh/test-recovery-mcp.mjs:ro" $(IMAGE):$(VERSION) --test /opt/agentteams/dsh/test-recovery-mcp.mjs
+	docker run --rm --entrypoint node -e AGENTTEAMS_MANAGED_NATIVE_MODULE=/opt/agentteams/plugins/teamharness/adapters/deepseek-harness/managed-native.js -v "$(CURDIR)/tests/native/managed-input.mjs:/opt/agentteams/dsh/test-managed-input.mjs:ro" $(IMAGE):$(VERSION) --test /opt/agentteams/dsh/test-managed-input.mjs
 
 direct-control-smoke:
 	docker run --rm --entrypoint python3 -v "$(CURDIR):/dm:ro" -e PYTHONPATH=/dm/scripts $(IMAGE):$(VERSION) /dm/tests/direct_control_smoke.py steer

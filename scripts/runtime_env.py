@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import sys
 
@@ -44,6 +45,32 @@ def desired_model(path: Path) -> tuple[str, str]:
         elif key == "gatewayUrl":
             gateway_url = _unquote(value)
     return model, gateway_url
+
+
+def worker_environment(path, worker):
+    """Resolve a managed Worker's native Matrix and model bindings at startup."""
+    if not os.getenv("AGENTTEAMS_CONTROLLER_URL") or os.getenv("AGENTTEAMS_AGENT_ROLE") == "manager":
+        return {}
+    import yaml
+    from worker_runtime_config import project
+
+    record = yaml.safe_load(path.read_text())
+    if record.get("member", {}).get("role") == "manager" or not record.get("matrix", {}).get("transport"):
+        return {}  # Installed Controllers predating the shared transport projection.
+    native_model = {"models": {"providers": {"deepseek": {"models": [
+        {"id": os.getenv("TEAMHARNESS_DSH_MODEL", "deepseek-v4-flash")}],
+        "apiKey": os.getenv("DEEPSEEK_API_KEY", ""), "baseUrl": os.getenv("DEEPSEEK_BASE_URL", "")}}}}
+    config = project(record, "deepseek-harness", worker, native_model)
+    matrix = config["channels"]["matrix"]
+    if str(matrix.get("encryption", False)).lower() in {"true", "1"}:
+        raise ValueError("DeepSeek Harness does not support Matrix E2EE")
+    result = {"AGENTTEAMS_MATRIX_URL": matrix["homeserver"], "AGENTTEAMS_WORKER_MATRIX_TOKEN": matrix["accessToken"],
+              "AGENTTEAMS_MATRIX_USER_ID": matrix["userId"]}
+    if record.get("desired", {}).get("model"):
+        provider = config["models"]["providers"]["agentteams-gateway"]
+        result.update(TEAMHARNESS_DSH_MODEL=provider["models"][0]["id"], DEEPSEEK_BASE_URL=provider["baseUrl"],
+                      DEEPSEEK_API_KEY=provider["apiKey"])
+    return result
 
 
 def deepseek_base_url(explicit_url: str, agentteams_gateway_url: str, runtime_gateway_url: str = "") -> str:
