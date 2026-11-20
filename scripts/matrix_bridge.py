@@ -796,6 +796,7 @@ def execution_status(client, event, status, message_id=None):
             "running": "正在执行", "stopping": "正在停止", "stopped": "已停止",
             "completed": "本轮已结束", "failed": "执行失败",
         }[status],
+        "org.agentteams.progress_only": True,
         "com.agentteams.execution": {"run_id": event["event_id"], "status": status,
             "capabilities": ["stop", "steer"], **({"message_id": message_id} if message_id else {})},
     }, f"{event['event_id']}:execution:{status}")
