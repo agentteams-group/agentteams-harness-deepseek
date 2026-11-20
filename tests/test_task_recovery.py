@@ -99,6 +99,19 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual(self.state.next_batch, "retained-cursor")
         self.assertEqual(self.state.data["events"]["$backlog"]["status"], "queued")
 
+    def test_native_sandbox_uses_assigned_task_directory(self):
+        shared = self.workspace / "shared"
+        with patch.dict(os.environ, {"TEAMHARNESS_SHARED_DIR": str(shared)}):
+            self.recover()
+        self.assertEqual(self.run.call_args.args[1], (shared / "tasks" / "stable").resolve())
+        self.assertTrue((shared / "tasks" / "stable").is_dir())
+
+    def test_task_directory_cannot_escape_tasks_root(self):
+        self.task["task_id"] = "../../other"
+        with self.assertRaisesRegex(ValueError, "escapes"):
+            self.recover()
+        self.run.assert_not_called()
+
     def test_saved_result_recovery_never_runs_the_model(self):
         self.task.update(status="submitted")
         self.saved_result("saved report")
