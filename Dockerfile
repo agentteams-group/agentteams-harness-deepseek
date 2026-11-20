@@ -56,6 +56,7 @@ COPY plugins/teamharness/adapters/deepseek-harness/ /opt/agentteams/plugins/team
 RUN mkdir -p /opt/agentteams/dsh-template /tmp/adapter-pack \
     && DSH_HOME=/opt/agentteams/dsh-template pnpm --dir /opt/agentteams/plugins/teamharness/adapters/deepseek-harness pack --pack-destination /tmp/adapter-pack \
     && DSH_HOME=/opt/agentteams/dsh-template dsh plugin --profile headless add /tmp/adapter-pack/*.tgz \
+    && cmp /opt/agentteams/plugins/teamharness/adapters/deepseek-harness/managed-native.js /opt/agentteams/dsh-template/profiles/headless/node_modules/agentteams-teamharness-dsh/managed-native.js \
     && rm -rf /tmp/adapter-pack
 
 COPY scripts/deepseek-harness-worker-entrypoint.sh /opt/agentteams/scripts/deepseek-harness-worker-entrypoint.sh
