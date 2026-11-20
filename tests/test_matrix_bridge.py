@@ -4,7 +4,7 @@ import tempfile
 import unittest
 import urllib.parse
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
@@ -12,6 +12,7 @@ from matrix_bridge import (  # noqa: E402
     BridgeState,
     MatrixClient,
     dsh_error_detail,
+    execution_status,
     materialize_attachment,
     manager_allowed_senders,
     matrix_events,
@@ -27,6 +28,18 @@ from matrix_bridge import (  # noqa: E402
     text_events,
     visible_matrix_user_ids,
 )
+
+
+class ExecutionStatusContractTest(unittest.TestCase):
+    def test_status_is_progress_only_for_every_state(self):
+        client = Mock()
+        for status in ("running", "stopping", "stopped", "completed", "failed"):
+            with self.subTest(status=status):
+                execution_status(client, {"room_id": "!dm:test", "event_id": "$original"}, status)
+                content = client.send_content.call_args.args[1]
+                self.assertEqual(content["msgtype"], "m.notice")
+                self.assertIs(content["org.agentteams.progress_only"], True)
+                self.assertEqual(content["com.agentteams.execution"]["status"], status)
 
 
 class LimitedTimelineTest(unittest.TestCase):
