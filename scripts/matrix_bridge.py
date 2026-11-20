@@ -925,9 +925,13 @@ def run_managed_worker(client, worker, runtime_path, workspace, timeout, own, st
                 continue
             receiver.require_room(room)
             parsed = managed_matrix_event(row, rooms, own, agents, transport)
-            if parsed is None or parsed[0] != row["intent"]:
+            if parsed is None:
                 continue
             intent, task_id, event = parsed
+            retained_coordination = (row["intent"] == "control" and intent == "message"
+                and "org.agentteams.coordination" in row["input"].get("content", {}))
+            if intent != row["intent"] and not retained_coordination:
+                continue
             if intent == "task_notification" and (not task_id or row.get("work", {}).get("task_id") != task_id):
                 continue
             receipt = row.get("native_commit") or {}

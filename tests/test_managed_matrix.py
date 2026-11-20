@@ -105,15 +105,27 @@ class ManagedMatrixTest(unittest.TestCase):
         native.assert_not_called()
 
     def test_managed_loop_consumes_shared_pending_with_no_new_native_timeline(self):
+        self.check_managed_pending("message")
+
+    def test_backfilled_coordination_control_uses_native_message_dispatch(self):
+        self.event["input"]["content"]["org.agentteams.coordination"] = {}
+        packet = {"text": "Review submission", "session_id": "coordination-submission:id",
+                  "meta": {"teamharness_coordination": {"kind": "task_submitted", "task_id": "T"}}}
+        with patch("task_coordination.notification", return_value=packet):
+            self.check_managed_pending("control")
+
+    def check_managed_pending(self, stored_intent):
         runtime = self.workspace / "runtime.yaml"
         runtime.write_text("member:\n  matrixUserId: '@agent'\n  personalRoomId: '!dm'\n")
         stop, order = threading.Event(), []
         rec = Mock(process="p")
         rec.discover.side_effect = lambda: order.append("discover") or {"tasks":[]}
         self.client.request.return_value = {"joined_rooms": ["!dm", "!unwatched"]}
-        self.matrix.pending.return_value = [{**self.event, "intent":"message"}]
+        self.matrix.pending.return_value = [{**self.event, "intent":stored_intent}]
         def receiver(matrix, client, own, classify, observe):
             def poll(_):
+                if "sync" in order:
+                    stop.set()
                 order.append("sync")
                 self.assertEqual(observe({"rooms": {}}), {"!dm", "!unwatched"})
                 return {"state": {"rooms": {"!dm": {}}, "pending": ["key"]}}, {}
