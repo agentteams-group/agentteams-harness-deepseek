@@ -49,3 +49,16 @@ test('missing or different durable user input prevents native commit', async () 
   await commit()
   assert.equal(commits, 1)
 })
+
+test('a returned read failure is recorded and can be followed by another native tool', async () => {
+  const handlers = {}, receipts = [], agent = {}
+  installExecutionGuard({ on: (name, handler) => { handlers[name] = handler } }, agent, {event_key:'source'}, async () => {}, (action, fields) => {
+    if (action.endsWith('begin_tools')) return fields.calls[0].id
+    if (action.endsWith('finish_tools')) receipts.push(fields.results[0])
+  })
+  const error = {isError:true, content:[{type:'text',text:'File not found'}]}
+  assert.deepEqual(await handlers['tools/execute']({agent,callId:'read-error',name:'read',arguments:{}}, async () => error), error)
+  await handlers['tools/execute']({agent,callId:'next',name:'read',arguments:{}}, async () => ({content:[]}))
+  assert.equal(receipts.length, 2)
+  assert.equal(receipts[0].isError, true)
+})

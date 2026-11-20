@@ -70,6 +70,18 @@ class DeepSeekHarnessEntrypointTest(unittest.TestCase):
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("no LLM credential available", completed.stdout + completed.stderr)
 
+    def test_builtin_mcp_workspace_is_bound_without_model_supplied_paths(self):
+        import sys
+        lines = [line for line in ENTRYPOINT.read_text().splitlines()
+                 if line.startswith("export TEAMHARNESS_SHARED_DIR=")]
+        command = "\n".join(lines) + '\nexec "$TEST_PYTHON" -c "from mcp.common.paths import _workspace_dir; print(_workspace_dir({}))"'
+        result = subprocess.run(["bash", "-e", "-c", command], capture_output=True, text=True,
+            env={**os.environ, "WORKER_HOME": "/tmp/synthetic-worker", "TEST_PYTHON": sys.executable,
+                 "TEAMHARNESS_SHARED_DIR": "", "AGENTTEAMS_SHARED_DIR": "", "QWENPAW_WORKING_DIR": "", "COPAW_WORKING_DIR": "",
+                 "PYTHONPATH": str(AT_SOURCE / "plugins/teamharness")})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "/tmp/synthetic-worker")
+
 
 class DeepSeekHarnessLauncherTest(unittest.TestCase):
     def test_extensionless_shell_launcher_uses_lf_line_endings(self) -> None:

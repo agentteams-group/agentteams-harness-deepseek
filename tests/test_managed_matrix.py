@@ -39,6 +39,23 @@ class ManagedMatrixTest(unittest.TestCase):
         self.event["input"]["unsigned"] = {"redacted_because": {"event_id":"$redaction"}}
         self.assertIsNone(classify({}))
 
+    def test_control_in_a_new_joined_task_room_does_not_require_static_room_mapping(self):
+        self.event["input"]["content"]["org.agentteams.coordination"] = {}
+        packet = {"text": "Review the submitted task", "session_id": "coordination-submission:id",
+                  "meta": {"teamharness_coordination": {"kind": "task_submitted", "task_id": "T"}}}
+        with patch("task_coordination.notification", return_value=packet):
+            self.assertEqual(bridge.managed_matrix_event(self.event, {}, "@agent", set(), {})[:2], ("message", None))
+        self.event["input"]["content"].pop("org.agentteams.coordination")
+        self.assertIsNone(bridge.managed_matrix_event(self.event, {}, "@agent", set(), {}))
+
+    def test_authorized_task_room_invite_is_joined_before_assignment(self):
+        self.client.request.return_value = {"joined_rooms": ["!task"]}
+        event = {"type": "m.room.member", "state_key": "@agent", "sender": "@leader",
+                 "content": {"membership": "invite"}}
+        transport = {"groupPolicy": "allowlist", "groupAllowFrom": ["@leader"]}
+        bridge.managed_rooms(self.client, {"rooms": {"invite": {"!task": {"invite_state": {"events": [event]}}}}}, {}, "@agent", transport)
+        self.client.request.assert_any_call("POST", "/_matrix/client/v3/join/%21task", {})
+
     def recover(self):
         return bridge.recover_message(self.client, self.matrix, self.sessions, self.native, "@agent", set(), "worker", self.workspace, 10, admit=lambda *_: True)
 
@@ -88,17 +105,29 @@ class ManagedMatrixTest(unittest.TestCase):
         native.assert_not_called()
 
     def test_managed_loop_consumes_shared_pending_with_no_new_native_timeline(self):
+        self.check_managed_pending("message")
+
+    def test_backfilled_coordination_control_uses_native_message_dispatch(self):
+        self.event["input"]["content"]["org.agentteams.coordination"] = {}
+        packet = {"text": "Review submission", "session_id": "coordination-submission:id",
+                  "meta": {"teamharness_coordination": {"kind": "task_submitted", "task_id": "T"}}}
+        with patch("task_coordination.notification", return_value=packet):
+            self.check_managed_pending("control")
+
+    def check_managed_pending(self, stored_intent):
         runtime = self.workspace / "runtime.yaml"
         runtime.write_text("member:\n  matrixUserId: '@agent'\n  personalRoomId: '!dm'\n")
         stop, order = threading.Event(), []
         rec = Mock(process="p")
         rec.discover.side_effect = lambda: order.append("discover") or {"tasks":[]}
         self.client.request.return_value = {"joined_rooms": ["!dm", "!unwatched"]}
-        self.matrix.pending.return_value = [{**self.event, "intent":"message"}]
+        self.matrix.pending.return_value = [{**self.event, "intent":stored_intent}]
         def receiver(matrix, client, own, classify, observe):
             def poll(_):
+                if "sync" in order:
+                    stop.set()
                 order.append("sync")
-                self.assertEqual(observe({"rooms": {}}), {"!dm"})
+                self.assertEqual(observe({"rooms": {}}), {"!dm", "!unwatched"})
                 return {"state": {"rooms": {"!dm": {}}, "pending": ["key"]}}, {}
             return Mock(poll=poll)
         def tasks(*args, on_scan, **kwargs):
@@ -115,3 +144,31 @@ class ManagedMatrixTest(unittest.TestCase):
         self.matrix.start.assert_called_once()
         self.assertEqual(order, ["discover", "sync", "claim", "scanned", "runtime.ready", "message"])
         self.assertFalse((self.workspace / "matrix-bridge-state.json").exists())
+
+    def test_new_authorized_direct_room_is_joined_and_watched(self):
+        rooms = {"!known": "team"}
+        transport = {"dm": {"policy": "allowlist", "allowFrom": ["@owner"]}}
+        invite = lambda sender: {"invite_state": {"events": [{
+            "type": "m.room.member", "state_key": "@agent", "sender": sender,
+            "content": {"membership": "invite", "is_direct": True}}]}}
+        payload = {"rooms": {"invite": {"!new": invite("@owner"), "!untrusted": invite("@other")}}}
+        def request(method, path, *args):
+            if path.endswith("/joined_rooms"):
+                return {"joined_rooms": ["!known", "!new", "!group", "!untrusted"]}
+            if path.endswith("/joined_members"):
+                members = ["@agent", "@owner"] if "%21new/" in path else ["@agent", "@other", "@owner"]
+                return {"joined": {user: {} for user in members}}
+            return {}
+        self.client.request.side_effect = request
+        watched = bridge.managed_rooms(self.client, payload, rooms, "@agent", transport)
+        self.assertEqual(watched, {"!known", "!new", "!group", "!untrusted"})
+        self.assertNotIn("!group", rooms)
+        self.assertNotIn("!untrusted", rooms)
+        self.assertEqual(rooms["!new"], "personal")
+        self.client.request.assert_any_call("POST", "/_matrix/client/v3/join/%21new", {})
+        self.assertFalse(any("%21untrusted" in call.args[1] and call.args[0] == "POST"
+                             for call in self.client.request.call_args_list))
+
+    def test_disabled_direct_policy_does_not_discover_rooms(self):
+        self.client.request.return_value = {"joined_rooms": ["!new"]}
+        self.assertEqual(bridge.managed_rooms(self.client, {}, {}, "@agent", {"dm": {"policy": "disabled"}}), {"!new"})

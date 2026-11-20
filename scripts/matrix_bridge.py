@@ -585,8 +585,15 @@ def recover_tasks(client, state, worker_name, workspace, timeout_seconds, own_us
             "poll_control": lambda: task_stopped(recovery, task_id, team, task["execution"]),
             "source_key": source_key, "attach_only": attach_only, "identity": {"team_id": team, "task_id": task_id,
                 **{field: task["execution"][field] for field in ("generation", "instance_id", "process_id")}}}
+        # Keep native file permissions scoped to this assigned Task, matching
+        # the taskDirectory returned by TeamHarness ACK.
+        tasks_root = (Path(os.getenv("TEAMHARNESS_SHARED_DIR") or workspace.parent / "shared") / "tasks").resolve()
+        task_workspace = (tasks_root / task_id).resolve()
+        if not task_workspace.is_relative_to(tasks_root) or task_workspace == tasks_root:
+            raise ValueError("Task directory escapes the assigned tasks root")
+        task_workspace.mkdir(parents=True, exist_ok=True)
         if attach_only:
-            run_dsh("", workspace, timeout_seconds, **kwargs)
+            run_dsh("", task_workspace, timeout_seconds, **kwargs)
             sync_sessions(worker_name)
             digest = native_session_digest(session_id)
             if digest:
@@ -598,13 +605,13 @@ def recover_tasks(client, state, worker_name, workspace, timeout_seconds, own_us
         admitted.add(admission)
         try:
             try:
-                answer = run_dsh(text, workspace, timeout_seconds, **kwargs)
+                answer = run_dsh(text, task_workspace, timeout_seconds, **kwargs)
             except MissingNativeSession:
                 if not resume:
                     raise
                 session_id = "session-task-" + uuid.uuid4().hex
                 kwargs.update(session_id=session_id, resume=False)
-                answer = run_dsh(text, workspace, timeout_seconds, **kwargs)
+                answer = run_dsh(text, task_workspace, timeout_seconds, **kwargs)
             sync_sessions(worker_name)
             saved, answer = recovery.prepare_reply(task_id, team, answer)
         except Exception:
@@ -626,7 +633,7 @@ def managed_matrix_event(source, room_types, own, agents, transport):
 
     room, raw = source["room_id"], source["input"]
     content, sender = raw.get("content") or {}, raw.get("sender")
-    if not sender or room not in room_types or raw.get("unsigned", {}).get("redacted_because"):
+    if not sender or raw.get("unsigned", {}).get("redacted_because"):
         return None
     if "org.agentteams.coordination" in content:
         try:
@@ -637,6 +644,8 @@ def managed_matrix_event(source, room_types, own, agents, transport):
         if meta["kind"] == "task_assigned":
             return "task_notification", meta["task_id"], {"coordination_session": packet["session_id"], "body": packet["text"]}
         return "message", None, {"coordination_session": packet["session_id"], "body": packet["text"]}
+    if room not in room_types:
+        return None
     if content.get("org.agentteams.progress_only") or sender == own:
         return None
     personal = room_types[room] == "personal"
@@ -851,6 +860,36 @@ def serve_health() -> None:
     server.server_close()
 
 
+def managed_rooms(client, payload, rooms, own, transport):
+    """Discover authorized direct conversations in addition to projected rooms."""
+    dm = transport.get("dm") or {}
+    allowed = set(dm.get("allowFrom") or [])
+
+    def admits(sender, personal=True):
+        policy = dm.get("policy") if personal else transport.get("groupPolicy")
+        senders = allowed if personal else set(transport.get("groupAllowFrom") or [])
+        return policy != "disabled" and (policy == "open" or sender in senders or "*" in senders)
+
+    for room, invite in payload.get("rooms", {}).get("invite", {}).items():
+        direct = any(event.get("type") == "m.room.member" and event.get("state_key") == own
+            and event.get("content", {}).get("membership") == "invite"
+            and admits(event.get("sender"), event.get("content", {}).get("is_direct") is True)
+            for event in invite.get("invite_state", {}).get("events", []))
+        if room in rooms or direct:
+            client.request("POST", "/_matrix/client/v3/join/" + urllib.parse.quote(room, safe=""), {})
+    actual = client.request("GET", "/_matrix/client/v3/joined_rooms")["joined_rooms"]
+    for room in actual:
+        if room in rooms or dm.get("policy") == "disabled":
+            continue
+        members = set(client.request("GET", "/_matrix/client/v3/rooms/"
+            + urllib.parse.quote(room, safe="") + "/joined_members").get("joined", {}))
+        if own in members and len(members) == 2 and admits(next(iter(members - {own}))):
+            rooms[room] = "personal"
+    # Unknown joined rooms admit only receipt-verified coordination controls;
+    # ordinary chat still requires a configured or verified direct room.
+    return set(actual)
+
+
 def run_managed_worker(client, worker, runtime_path, workspace, timeout, own, stop):
     import yaml
     from task_recovery import Recovery, RecoveryConflict
@@ -868,12 +907,8 @@ def run_managed_worker(client, worker, runtime_path, workspace, timeout, own, st
     joined = set()
 
     def observe(payload):
-        for room in payload.get("rooms", {}).get("invite", {}):
-            if room in rooms:
-                client.request("POST", "/_matrix/client/v3/join/" + urllib.parse.quote(room, safe=""), {})
-        actual = client.request("GET", "/_matrix/client/v3/joined_rooms")["joined_rooms"]
         joined.clear()
-        joined.update(room for room in actual if room in rooms)
+        joined.update(managed_rooms(client, payload, rooms, own, transport))
         return joined
 
     def classify(room, raw):
@@ -890,9 +925,13 @@ def run_managed_worker(client, worker, runtime_path, workspace, timeout, own, st
                 continue
             receiver.require_room(room)
             parsed = managed_matrix_event(row, rooms, own, agents, transport)
-            if parsed is None or parsed[0] != row["intent"]:
+            if parsed is None:
                 continue
             intent, task_id, event = parsed
+            retained_coordination = (row["intent"] == "control" and intent == "message"
+                and "org.agentteams.coordination" in row["input"].get("content", {}))
+            if intent != row["intent"] and not retained_coordination:
+                continue
             if intent == "task_notification" and (not task_id or row.get("work", {}).get("task_id") != task_id):
                 continue
             receipt = row.get("native_commit") or {}

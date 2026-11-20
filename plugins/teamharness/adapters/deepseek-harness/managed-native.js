@@ -68,10 +68,10 @@ export function installExecutionGuard(ctx, agent, identity, beforeRequest, rpc =
       uncertain = false
       try {
         const result = await next()
-        if (uncertain || !result || result.isError || execution.signal?.aborted || !Array.isArray(result.content)) {
+        if (uncertain || !result || (result.isError && call.name !== 'read') || execution.signal?.aborted || !Array.isArray(result.content)) {
           throw new Error('Native tool result is unconfirmed')
         }
-        rpc('matrix.message.finish_tools', { identity, operation_id, results: [{ id: call.id, content: result.content }] })
+        rpc('matrix.message.finish_tools', { identity, operation_id, results: [{ id: call.id, content: result.content, isError: result.isError === true }] })
         return result
       } finally {
         active = undefined

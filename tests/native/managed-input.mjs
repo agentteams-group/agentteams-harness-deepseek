@@ -71,6 +71,13 @@ test('DSH tool dispatch reserves before a real body and keeps ambiguous results 
     assert.equal((await run('known')).isError, false)
     assert.equal((await run('uncertain')).isError, true)
     assert.deepEqual(effects, ['reserve:known','body:known','confirm:known','reserve:uncertain','body:uncertain'])
+    tools.register(defineContentToolFixture({
+      name:'read', description:'Read-only fixture', parameters:{},
+      async execute() { throw new Error('File not found') },
+    }))
+    const failedRead = await tools.execute({callId:'read-error',name:'read',arguments:{},signal:new AbortController().signal})
+    assert.equal(failedRead.isError, true)
+    assert.deepEqual(effects.slice(-2), ['reserve:read-error','confirm:read-error'])
   } finally {
     await ctx.registry.delete(ToolRuntime)
     await ctx.registry.delete(SystemPrompt)
