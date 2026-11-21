@@ -15,6 +15,7 @@ class Endpoint(BaseHTTPRequestHandler):
     called_tool = False
     task_phase = False
     phase_calls = 0
+    fail_model = False
     def do_POST(self):
         data = self.rfile.read(int(self.headers['Content-Length']))
         if self.path == '/v1/traces':
@@ -25,6 +26,12 @@ class Endpoint(BaseHTTPRequestHandler):
             return
         assert self.path == '/chat/completions', self.path
         request = json.loads(data)
+        if type(self).fail_model:
+            self.send_response(401)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(b'{"error":{"message":"fixture unauthorized","type":"invalid_api_key"}}')
+            return
         tools = request.get('tools', [])
         if tools:
             assert any(t.get('function', {}).get('name') == 'mcp__teamharness__task' for t in tools), tools
@@ -156,5 +163,20 @@ process.stdout.write(JSON.stringify(lines));"""
         assert any(record.get('type') == 'user/message' and record['data'].get('source', {}).get('plugin') == 'agentteams.task-phase' for record in records), records
         assert any(record.get('type') == 'tool/result' for record in records), records
         print('Actual Task phase: one model call, normal native completion, durable tool/receipt and code final: PASS')
+        spans.clear()
+        Endpoint.fail_model = True
+        env['TEAMHARNESS_DSH_SESSION_ID'] = 'opaque-error-fixture'
+        env['TEAMHARNESS_MATRIX_EVENT_ID'] = '$native-error-source'
+        env['TEAMHARNESS_NATIVE_TASK_CONTEXT'] = json.dumps({'role': 'worker', 'meta': {'room_id': '!native-trace:test',
+            'sender_id': '@human:test', 'event_id': '$native-error-source'}})
+        failure = subprocess.run(['agentteams-dsh', 'Own synthetic failure fixture.'], cwd=workspace,
+            env=env, capture_output=True, text=True, timeout=45)
+        assert failure.returncode != 0
+        failed_model = next(span for span in spans if fields(span).get('gen_ai.operation.name') == 'chat')
+        failed_turn = next(span for span in spans if span.name == 'worker.turn')
+        assert failed_model.status.code == 2, failed_model
+        assert failed_turn.status.code == 2, failed_turn
+        assert fields(failed_model).get('error.type'), failed_model
+        print('Actual model HTTP 401 exports ERROR on native model and turn spans: PASS')
     finally:
         server.shutdown()
