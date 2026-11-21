@@ -642,8 +642,8 @@ def managed_matrix_event(source, room_types, own, agents, transport):
             return None
         meta = packet["meta"]["teamharness_coordination"]
         if meta["kind"] == "task_assigned":
-            return "task_notification", meta["task_id"], {"coordination_session": packet["session_id"], "body": packet["text"]}
-        return "message", None, {"coordination_session": packet["session_id"], "body": packet["text"]}
+            return "task_notification", meta["task_id"], {"coordination_session": packet["session_id"], "body": packet["text"], "_task_protocol_meta": packet["meta"]}
+        return "message", None, {"coordination_session": packet["session_id"], "body": packet["text"], "_task_protocol_meta": packet["meta"]}
     if room not in room_types:
         return None
     if content.get("org.agentteams.progress_only") or sender == own:

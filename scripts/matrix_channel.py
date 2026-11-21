@@ -57,7 +57,8 @@ def matrix_events(
                     continue  # Control packets fail closed on old or mismatched images.
                 found.append({"room_id": room_id, "event_id": event["event_id"],
                     "sender": sender, "body": packet["text"], "kind": "text",
-                    "coordination_session": packet["session_id"]})
+                    "coordination_session": packet["session_id"],
+                    "_task_protocol_meta": packet.get("meta", {})})
                 continue
             if sender == own_user_id:
                 continue
