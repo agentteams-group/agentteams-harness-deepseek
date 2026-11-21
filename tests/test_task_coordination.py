@@ -17,7 +17,7 @@ class CoordinationTest(unittest.TestCase):
             events = matrix_events(self.packet(**{'org.agentteams.coordination': {}}), {'!task:test': 'team'}, '@self:test')
         self.assertEqual(events[0]['body'], 'Canonical closure')
         self.assertEqual(events[0]['coordination_session'], 'coordination-close-task:main')
-        self.assertIs(events[0]['_task_protocol_meta'], verified)
+        self.assertEqual(events[0]['_task_protocol_meta']['teamharness_coordination'], verified['teamharness_coordination'])
         self.assertEqual(matrix_events(self.packet(), {'!task:test': 'team'}, '@self:test'), [])
     def test_bad_control_never_falls_back_to_visible_body(self):
         helper = SimpleNamespace(notification=Mock(side_effect=ValueError('wrong scope')), IgnoredNotification=ValueError)

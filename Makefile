@@ -26,6 +26,8 @@ smoke:
 	docker run --rm --entrypoint node -e AGENTTEAMS_INTERACTIONS_MODULE=/opt/agentteams/plugins/teamharness/adapters/deepseek-harness/matrix-interactions.js -v "$(CURDIR)/tests/native/matrix-interactions.mjs:/opt/agentteams/dsh/test-matrix-interactions.mjs:ro" $(IMAGE):$(VERSION) --test /opt/agentteams/dsh/test-matrix-interactions.mjs
 	docker run --rm --entrypoint node -v "$(CURDIR)/tests/native/recovery-mcp.mjs:/opt/agentteams/dsh/test-recovery-mcp.mjs:ro" $(IMAGE):$(VERSION) --test /opt/agentteams/dsh/test-recovery-mcp.mjs
 	docker run --rm --entrypoint node -e AGENTTEAMS_MANAGED_NATIVE_MODULE=/opt/agentteams/dsh-template/profiles/headless/node_modules/agentteams-teamharness-dsh/managed-native.js -v "$(CURDIR)/tests/native/managed-input.mjs:/opt/agentteams/dsh/test-managed-input.mjs:ro" $(IMAGE):$(VERSION) --test /opt/agentteams/dsh/test-managed-input.mjs
+	docker run --rm --network none --entrypoint node -e AGENTTEAMS_PUBLIC_TASK_MODULE=/opt/agentteams/dsh-template/profiles/headless/node_modules/agentteams-teamharness-dsh/public-task.js -e AGENTTEAMS_PLUGIN_DIR=/opt/agentteams/plugins/teamharness -v "$(CURDIR)/tests/native/public-task.mjs:/opt/agentteams/dsh/test-public-task.mjs:ro" $(IMAGE):$(VERSION) --test /opt/agentteams/dsh/test-public-task.mjs
+	docker run --rm --network none --entrypoint /opt/venv/agentteams/bin/python3 -e AGENTTEAMS_TEST_ADAPTER_SOURCE=/dm/plugins/teamharness/adapters/deepseek-harness -v "$(CURDIR):/dm:ro" $(IMAGE):$(VERSION) /dm/tests/native_trace_smoke.py
 
 direct-control-smoke:
 	docker run --rm --entrypoint python3 -v "$(CURDIR):/dm:ro" -e PYTHONPATH=/dm/scripts $(IMAGE):$(VERSION) /dm/tests/direct_control_smoke.py steer

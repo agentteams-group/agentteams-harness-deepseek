@@ -62,3 +62,18 @@ test('a returned read failure is recorded and can be followed by another native 
   assert.equal(receipts.length, 2)
   assert.equal(receipts[0].isError, true)
 })
+
+test('only a trusted Task validation refusal can close an effect-free rejected operation', async () => {
+  const handlers = {}, receipts = [], agent = {}
+  installExecutionGuard({ on: (name, handler) => { handlers[name] = handler } }, agent, { event_key: 'source' }, async () => {}, (action, fields) => {
+    if (action.endsWith('begin_tools')) return fields.calls[0].id
+    if (action.endsWith('finish_tools')) receipts.push(fields.results[0])
+  })
+  const refusal = { isError: true, content: [{ type: 'text', text: 'Wrong Task identity; CLI not invoked' }],
+    error: { info: { code: 'TASK_NO_EFFECT' } } }
+  const invoke = name => handlers['tools/execute']({ agent, callId: name, name, arguments: {} }, async () => refusal)
+  await invoke('mcp__teamharness__task')
+  assert.equal(receipts.length, 1)
+  await assert.rejects(invoke('external_tool'), /unconfirmed/)
+  assert.equal(receipts.length, 1)
+})

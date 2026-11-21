@@ -380,6 +380,7 @@ def run_dsh(
     sender: str = "",
     source_event_ids: list[str] | None = None,
     identity: dict | None = None, source_key: str = "", attach_only: bool = False,
+    protocol_meta: dict | None = None,
 ) -> str:
     environment = os.environ.copy()
     runtime_path = environment.get("TEAMHARNESS_RUNTIME_CONFIG")
@@ -406,6 +407,16 @@ def run_dsh(
             "TEAMHARNESS_SESSION_SOURCE_EVENT_IDS": json.dumps(source_event_ids or [event_id]),
         }
     )
+    if room_id and sender:
+        native_event = event_id if event_id.startswith("$") else (source_event_ids or [event_id])[0]
+        native_meta = {**(protocol_meta or {}), "room_id": room_id, "sender_id": sender, "event_id": native_event}
+        if len(source_event_ids or []) > 1 and not native_meta.get("teamharness_coordination"):
+            native_meta["matrix_input_sources"] = [
+                {"room_id": room_id, "sender_id": sender, "event_id": source} for source in source_event_ids]
+        environment["TEAMHARNESS_NATIVE_TASK_CONTEXT"] = json.dumps({
+            "role": environment.get("AGENTTEAMS_AGENT_ROLE", "worker"),
+            "meta": native_meta,
+        })
     if identity:
         environment.update(TEAMHARNESS_EXECUTION_IDENTITY=json.dumps(identity), TEAMHARNESS_MATRIX_SOURCE_KEY=source_key,
             TEAMHARNESS_SOURCE_EVENT_ID=(source_event_ids or [""])[0], TEAMHARNESS_DSH_ATTACH_ONLY=str(attach_only).lower())
@@ -582,6 +593,7 @@ def recover_tasks(client, state, worker_name, workspace, timeout_seconds, own_us
         kwargs = {"session_id": session_id, "resume": resume, "event_id": event_id, "attempt": 1,
             "room_id": task["room_id"], "sender": source["sender"] if source else own_user_id,
             "source_event_ids": [source["event_id"]] if source else [],
+            "protocol_meta": (source or {}).get("_task_protocol_meta") or {"otel_carrier": (source or {}).get("otel_carrier", {})},
             "poll_control": lambda: task_stopped(recovery, task_id, team, task["execution"]),
             "source_key": source_key, "attach_only": attach_only, "identity": {"team_id": team, "task_id": task_id,
                 **{field: task["execution"][field] for field in ("generation", "instance_id", "process_id")}}}
@@ -641,6 +653,7 @@ def managed_matrix_event(source, room_types, own, agents, transport):
         except IgnoredNotification:
             return None
         meta = packet["meta"]["teamharness_coordination"]
+        packet["meta"] = {**packet["meta"], "otel_carrier": content.get("com.agentteams.trace", {})}
         if meta["kind"] == "task_assigned":
             return "task_notification", meta["task_id"], {"coordination_session": packet["session_id"], "body": packet["text"], "_task_protocol_meta": packet["meta"]}
         return "message", None, {"coordination_session": packet["session_id"], "body": packet["text"], "_task_protocol_meta": packet["meta"]}
@@ -726,7 +739,8 @@ def recover_message(client, matrix, sessions, source, own, agents, worker, works
     before = snapshot_outbox(workspace)
     kwargs = dict(session_id=ref, resume=reuse, identity=identity, source_key=key,
         room_id=source["room_id"], sender=source["sender"], source_event_ids=[source["event_id"]],
-        event_id=f"recovery:{key}:{identity['generation']}:{claim['checkpoint_digest']}", attempt=1, poll_control=stopped)
+        event_id=f"recovery:{key}:{identity['generation']}:{claim['checkpoint_digest']}", attempt=1, poll_control=stopped,
+        protocol_meta=source.get("_task_protocol_meta") or {"otel_carrier": source.get("otel_carrier", {})})
     try:
         text = run_dsh(task if reuse else new_prompt(), workspace, timeout, **kwargs)
     except MissingNativeSession:
@@ -1142,6 +1156,7 @@ def main() -> int:
                             room_id=event["room_id"],
                             sender=event["sender"],
                             source_event_ids=state.data["events"][event["event_id"]].get("direct_input_ids", [event["event_id"]]),
+                            protocol_meta=event.get("_task_protocol_meta") or {"otel_carrier": event.get("otel_carrier", {})},
                         )
                         sync_sessions(worker_name)
                         state.mark_session_ready(event.get("coordination_session", event["room_id"]))
