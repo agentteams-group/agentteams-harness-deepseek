@@ -5,6 +5,7 @@ import { freezeMessage, MessageId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { matrixEventMessageId } from './message-id.js'
 import { executeAttempt } from './turn.js'
+import { openSteering } from './steering.js'
 import { checkpointInput } from './session-receipt.js'
 import { installMatrixInteractions } from './matrix-interactions.js'
 import { runtimeRecord } from './runtime-logging.js'
@@ -137,7 +138,27 @@ async function run(ctx, config, io) {
   })
   const existingInput = agent.session.events.find(event => event.type === 'user/message' && event.data.id === id)
   if (existingInput && !identity) await checkpointInput(agent.session, existingInput, receipt)
-  const outcome = await executeAttempt({
+  const steering = await openSteering(process.env.TEAMHARNESS_DSH_CONTROL_SOCKET, agent, {
+    message: request => userMessage(request.body, messageId(request.event_id, 1)),
+    flush: () => sessions.flush(agent.session),
+    beforeSteer: async request => {
+      if (!request.source_key) return
+      const source = recoveryCall('matrix.native.get', { event_key: request.source_key }).input
+      if (source.room_id !== process.env.TEAMHARNESS_MATRIX_ROOM_ID ||
+          source.input.sender !== process.env.TEAMHARNESS_MATRIX_SENDER ||
+          source.event_id !== request.event_id) throw new Error('Steering source changed')
+      const native = userMessage(JSON.stringify(source), messageId('agentteams-source-v1:' + request.event_id, 1))
+      if (!agent.session.events.some(event => event.type === 'user/message' && event.data.id === native.id)) {
+        agent.session.append('user/message', native, { surfaceOp: 'append' })
+      }
+      const row = agent.session.events.find(event => event.type === 'user/message' && event.data.id === native.id)
+      await sessions.flush(agent.session)
+      await commitMatrixSource(agent.session, row, ctx.get('sessionPersistence'), request.source_key, source)
+    },
+  })
+  let outcome
+  try {
+    outcome = await executeAttempt({
     getEvents: () => agent.session.events,
     id,
     firstSeq: agent.session.seq,
@@ -145,7 +166,10 @@ async function run(ctx, config, io) {
     followup: () => agent.followup(userMessage(config.task, id)),
     whenIdle: () => agent.whenIdle(),
     flush: () => sessions.flush(agent.session),
-  })
+    })
+  } finally {
+    await steering.close()
+  }
 
   await receiptCheckpoint.catch(() => {})
   await interactions?.flush()
