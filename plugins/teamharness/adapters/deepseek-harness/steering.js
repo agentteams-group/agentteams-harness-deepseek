@@ -25,6 +25,7 @@ export async function openSteering(path, agent, { message, flush, beforeSteer = 
         }
         if (agent.status === 'idle') return false
         await beforeSteer(request)
+        if (agent.status === 'idle') return false
         agent.steer(message(request))
         await flush()
         accepted.set(request.event_id, request.body)
