@@ -101,7 +101,7 @@ async function run(ctx, config, io) {
     frame.sessionId = sessionId
     frame.team = parse(readFileSync(process.env.TEAMHARNESS_RUNTIME_CONFIG, 'utf8')).team?.name
   }
-  if (frame && identity?.task_id && process.env.TEAMHARNESS_DSH_ATTACH_ONLY !== 'true') {
+  if (frame && !frame.meta.teamharness_coordination && identity?.task_id && process.env.TEAMHARNESS_DSH_ATTACH_ONLY !== 'true') {
     const current = checkExecution(identity).task
     if (current.task_plan_id) frame.meta.teamharness_coordination = { kind: 'task_assigned', task_id: current.task_id,
       main_task_id: current.main_task_id, project_id: current.project_id || '', delivery_id: current.notifyTxn }
