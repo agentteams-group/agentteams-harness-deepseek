@@ -63,7 +63,7 @@ test('a returned read failure is recorded and can be followed by another native 
   assert.equal(receipts[0].isError, true)
 })
 
-test('only a trusted Task validation refusal can close an effect-free rejected operation', async () => {
+test('a forged Task name and effect-free code cannot bypass a native journal', async () => {
   const handlers = {}, receipts = [], agent = {}
   installExecutionGuard({ on: (name, handler) => { handlers[name] = handler } }, agent, { event_key: 'source' }, async () => {}, (action, fields) => {
     if (action.endsWith('begin_tools')) return fields.calls[0].id
@@ -72,8 +72,43 @@ test('only a trusted Task validation refusal can close an effect-free rejected o
   const refusal = { isError: true, content: [{ type: 'text', text: 'Wrong Task identity; CLI not invoked' }],
     error: { info: { code: 'TASK_NO_EFFECT' } } }
   const invoke = name => handlers['tools/execute']({ agent, callId: name, name, arguments: {} }, async () => refusal)
-  await invoke('mcp__teamharness__task')
-  assert.equal(receipts.length, 1)
+  await assert.rejects(invoke('mcp__teamharness__task'), /unconfirmed/)
+  assert.equal(receipts.length, 0)
   await assert.rejects(invoke('external_tool'), /unconfirmed/)
-  assert.equal(receipts.length, 1)
+  assert.equal(receipts.length, 0)
+})
+
+
+test('Task execution admits the public checkpoint and journals business effects', async () => {
+  const handlers = {}, actions = [], agent = {}
+  const rpc = (action, fields) => {
+    actions.push(action)
+    if (action === 'admit_tools') return { task: { execution: { state: 'active', runtime: 'deepseek-harness' } } }
+    if (action === 'begin_tools') return 'business-op'
+    if (action === 'finish_tools') assert.equal(fields.operation_id, 'business-op')
+  }
+  installExecutionGuard({ on: (name, handler) => { handlers[name] = handler } }, agent,
+    { task_id: 'own', team_id: 'team' }, async () => {}, rpc,
+    execution => execution.nativeFixtureDefinition === true)
+  await handlers['agent/request']({}, async () => actions.push('model'))
+  await handlers['tools/execute']({agent,callId:'write',name:'write',arguments:{}}, async () => { actions.push('write'); return {content:[]} })
+  await handlers['tools/execute']({agent,callId:'submit',name:'mcp__teamharness__task',arguments:{},nativeFixtureDefinition:true},
+    async () => {actions.push('canonical'); return {content:[]} })
+  assert.deepEqual(actions, ['admit_tools','model','admit_tools','begin_tools','write','finish_tools','admit_tools','canonical'])
+})
+
+test('uncertain Task business effects block the next model admission', async () => {
+  const handlers = {}, agent = {}; let pending = false, modelCalls = 0
+  const rpc = action => {
+    if (action === 'admit_tools') {
+      if (pending) throw new Error('unconfirmed operation')
+      return {task:{execution:{state:'active',runtime:'deepseek-harness'}}}
+    }
+    if (action === 'begin_tools') { pending = true; return 'op' }
+    assert.fail('Uncertain result must not finish')
+  }
+  installExecutionGuard({on:(name,handler)=>{handlers[name]=handler}},agent,{task_id:'own'},async()=>{},rpc)
+  await assert.rejects(handlers['tools/execute']({agent,callId:'write',name:'write',arguments:{}},async()=>({isError:true,content:[]})),/unconfirmed/)
+  await assert.rejects(handlers['agent/request']({},async()=>{modelCalls++}),/unconfirmed/)
+  assert.equal(modelCalls,0)
 })

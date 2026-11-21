@@ -177,7 +177,8 @@ async function run(ctx, config, io) {
       sourceEventIds: JSON.parse(process.env.TEAMHARNESS_SESSION_SOURCE_EVENT_IDS || '[]'),
     }
     let receiptCheckpoint = Promise.resolve()
-    if (identity) installExecutionGuard(ctx, agent, identity, () => receiptCheckpoint)
+    if (identity) installExecutionGuard(ctx, agent, identity, () => receiptCheckpoint, recoveryCall,
+      execution => Boolean(publicTask?.nativeExecute) && ctx.get('tools').get(execution.name, agent)?.execute === publicTask.nativeExecute)
     else ctx.on('agent/request', async (_request, next) => { await receiptCheckpoint; return next() })
     ctx.on('session/event', (session, event) => {
       if (session === agent.session && process.env.AGENTTEAMS_LOG_CAPTURED === '1') {

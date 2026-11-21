@@ -145,7 +145,7 @@ export async function installPublicTask(agentCtx, state) {
     text: () => [skill, state.context.fact, state.context.context ? JSON.stringify(state.context.context) : '',
       state.context.roster ? '[Registered public team identities]\n' + JSON.stringify(state.context.roster) : '',
       '[Task input references]\n' + JSON.stringify(state.context.sources), ...receipts.values()].filter(Boolean).join('\n\n') })
-  tools.register({ name: TASK, description: schema.description, parameters: schema.inputSchema,
+  const definition = { name: TASK, description: schema.description, parameters: schema.inputSchema,
     output: { schema: { type: 'object' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
     async execute(arguments_, execution) {
       let response
@@ -170,7 +170,9 @@ export async function installPublicTask(agentCtx, state) {
       if (response.refreshedInputs?.length) return { ok: true, outcome: 'input_changed', noTaskRegistered: true, taskSystemContext: response.fact }
       return response.result
     },
-  })
+  }
+  state.nativeExecute = definition.execute
+  tools.register(definition)
   agentCtx.on('agent/turn-stopping', async ({ agent }) => {
     await persistPhaseReceipt(state, agent, agentCtx.get('sessions'), agentCtx.get('sessionPersistence'))
   })

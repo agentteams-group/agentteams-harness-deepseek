@@ -36,6 +36,7 @@ test('real DSH scope shadows old MCP Task, restricts legacy tools and preserves 
     const state = { context: { role: 'worker', execution: 'own', sources: [] }, pending: [], call: nativeCall }
     await installPublicTask(scoped.ctx, state)
     const native = scoped.ctx.get('tools')
+    assert.equal(tools.get('mcp__teamharness__task', key).execute, state.nativeExecute)
     const names = native.schemas(key).map(tool => tool.name)
     assert.ok(names.includes('mcp__teamharness__task'))
     assert.ok(names.includes('business_read'))
