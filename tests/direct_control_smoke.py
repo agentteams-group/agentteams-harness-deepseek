@@ -1,4 +1,4 @@
-"""Packaged native DSH tool cancellation and same-session continuation.
+"""Packaged native DSH steering, tool preservation, Stop and continuation.
 
 The model endpoint is deterministic; the DSH tool, process, and session are real.
 Run in the selected disposable Worker image with /dm/scripts on PYTHONPATH.
@@ -31,7 +31,7 @@ class Model(BaseHTTPRequestHandler):
         self.end_headers()
         if not type(self).sent_tool and any(t.get('function', {}).get('name') == 'bash' for t in request.get('tools', [])):
             type(self).sent_tool = True
-            arguments = json.dumps({'command': f'echo $$ > {self.pidfile}; sleep 30; touch {self.marker}', 'description': 'Wait for direct control cancellation', 'timeout': 40000})
+            arguments = json.dumps({'command': f'echo $$ > {self.pidfile}; while [ ! -f {self.release} ]; do sleep 0.1; done; touch {self.marker}', 'description': 'Wait for a steering boundary', 'timeout': 40000})
             delta = {'role': 'assistant', 'tool_calls': [{'index': 0, 'id': 'call-control', 'type': 'function', 'function': {'name': 'bash', 'arguments': arguments}}]}
             finish = 'tool_calls'
         else:
@@ -53,6 +53,7 @@ with tempfile.TemporaryDirectory() as temporary:
     runtime = root / 'runtime.yaml'
     runtime.write_text((plugin / 'adapters/deepseek-harness/fixtures/runtime.yaml').read_text().replace('role: worker', 'role: standalone'))
     Model.pidfile, Model.marker = workspace / 'pid', workspace / 'must-not-run'
+    Model.release = workspace / 'release-tool'
     server = ThreadingHTTPServer(('127.0.0.1', 0), Model)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     os.environ.update(DSH_HOME=str(home), DEEPSEEK_API_KEY='local-test-only',
@@ -81,18 +82,25 @@ with tempfile.TemporaryDirectory() as temporary:
         def send_content(self, room, content, tx):
             statuses.append(content['com.agentteams.execution']['status'])
 
-    def poll():
-        return Model.pidfile.exists() and poll_direct_control(Matrix(), 'cursor', active, state,
-            '@agent:test', {'!dm:test': 'personal'}, set(), None)
+    def poll(steer):
+        if not Model.pidfile.exists():
+            return False
+        stopped = poll_direct_control(Matrix(), 'cursor', active, state,
+            '@agent:test', {'!dm:test': 'personal'}, set(), None, steer)
+        if action == 'steer' and state.is_completed('$supplement'):
+            os.kill(int(Model.pidfile.read_text()), 0)
+            assert not Model.marker.exists()
+            Model.release.touch()
+        return stopped
 
     try:
         try:
-            run_dsh('ORIGINAL_TASK', workspace, 30, session_id='session-control', resume=False,
+            result = run_dsh('ORIGINAL_TASK', workspace, 30, session_id='session-control', resume=False,
                 event_id='$original', attempt=1, poll_control=poll)
-            raise AssertionError('native DSH did not stop')
+            assert action == 'steer' and result == 'CONTINUED_OK', result
         except InterruptedError:
-            pass
-        assert statuses == ['stopping'], statuses
+            assert action == 'stop'
+        assert statuses == ([] if action == 'steer' else ['stopping']), statuses
         assert Model.pidfile.exists(), 'native bash never started'
         pid = int(Model.pidfile.read_text())
         try:
@@ -101,19 +109,18 @@ with tempfile.TemporaryDirectory() as temporary:
             assert stat.exists() and stat.read_text().split()[2] == 'Z', 'native tool survived stop'
         except ProcessLookupError:
             pass
-        assert not Model.marker.exists()
+        assert Model.marker.exists() is (action == 'steer')
         pending = state.data['events']['$supplement']
         if action == 'steer':
-            inputs = pending['direct_inputs']
-            assert pending['status'] == 'queued'
-            assert inputs == ['ORIGINAL_TASK', 'SUPPLEMENT_HANGZHOU'], inputs
+            assert pending['status'] == 'completed'
+            assert any('ORIGINAL_TASK' in json.dumps(r['messages']) and 'SUPPLEMENT_HANGZHOU' in json.dumps(r['messages']) for r in Model.requests)
+            print('PASS: native DSH steer preserved the process and tool, and the next inference received the supplement')
         else:
             assert pending['status'] == 'completed'
             inputs = ['ORIGINAL_TASK', 'SUPPLEMENT_HANGZHOU']
-        result = run_dsh('\n'.join(inputs), workspace, 30, session_id='session-control', resume=True,
-            event_id='$supplement', attempt=1)
-        assert result == 'CONTINUED_OK', result
-        assert any('ORIGINAL_TASK' in json.dumps(r['messages']) and 'SUPPLEMENT_HANGZHOU' in json.dumps(r['messages']) for r in Model.requests)
-        print('PASS: native DSH bash stopped, control durable, session resumed with original and supplementary inputs')
+            result = run_dsh('\n'.join(inputs), workspace, 30, session_id='session-control', resume=True,
+                event_id='$supplement', attempt=1)
+            assert result == 'CONTINUED_OK', result
+            print('PASS: native DSH Stop cancelled the tool and the same session resumed')
     finally:
         server.shutdown()
