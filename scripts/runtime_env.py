@@ -48,7 +48,7 @@ def desired_model(path: Path) -> tuple[str, str]:
 
 
 def worker_environment(path, worker):
-    """Resolve a managed Worker's native Matrix and model bindings at startup."""
+    """Resolve a managed Worker's native Matrix and model bindings from the current runtime record."""
     if not os.getenv("AGENTTEAMS_CONTROLLER_URL") or os.getenv("AGENTTEAMS_AGENT_ROLE") == "manager":
         return {}
     import yaml
@@ -66,6 +66,10 @@ def worker_environment(path, worker):
         raise ValueError("DeepSeek Harness does not support Matrix E2EE")
     result = {"AGENTTEAMS_MATRIX_URL": matrix["homeserver"], "AGENTTEAMS_WORKER_MATRIX_TOKEN": matrix["accessToken"],
               "AGENTTEAMS_MATRIX_USER_ID": matrix["userId"]}
+    role = record["member"].get("role")
+    if role:
+        result.update(AGENTTEAMS_AGENT_ROLE=role, AGENTTEAMS_WORKER_ROLE=role,
+                      AGENTTEAMS_TEAM_NAME=(record.get("team") or {}).get("name", ""))
     if record.get("desired", {}).get("model"):
         provider = config["models"]["providers"]["agentteams-gateway"]
         result.update(TEAMHARNESS_DSH_MODEL=provider["models"][0]["id"], DEEPSEEK_BASE_URL=provider["baseUrl"],
