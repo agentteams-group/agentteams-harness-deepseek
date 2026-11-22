@@ -27,7 +27,7 @@ test('real DSH scope shadows old MCP Task, restricts legacy tools and preserves 
     await ctx.plugin(ToolRuntime, { mode: 'native' }).await()
     const tools = ctx.get('tools')
     let oldCalls = 0
-    for (const name of ['mcp__teamharness__task', 'mcp__teamharness__taskflow', 'business_read']) {
+    for (const name of ['task', 'mcp__teamharness__task', 'mcp__teamharness__taskflow', 'business_read']) {
       tools.register(defineContentToolFixture({ name, description: 'Own native fixture', parameters: {},
         async execute() { oldCalls++; return [{ type: 'text', text: 'legacy' }] } }))
     }
@@ -40,6 +40,8 @@ test('real DSH scope shadows old MCP Task, restricts legacy tools and preserves 
     const names = native.schemas(key).map(tool => tool.name)
     assert.ok(names.includes('mcp__teamharness__task'))
     assert.ok(names.includes('business_read'))
+    assert.ok(!names.includes('task'))
+    assert.ok(tools.schemas().some(tool => tool.name === 'task'))
     assert.ok(!names.includes('mcp__teamharness__taskflow'))
     assert.ok(tools.schemas().some(tool => tool.name === 'mcp__teamharness__taskflow'))
     const execute = arguments_ => native.execute({ agent, callId: 'own-call', name: 'mcp__teamharness__task',
@@ -51,6 +53,7 @@ test('real DSH scope shadows old MCP Task, restricts legacy tools and preserves 
     const result = JSON.parse(response.content.find(block => block.type === 'text').text)
     assert.equal(result.task.submissionId, 'saved')
     const prompt = await scoped.ctx.get('systemPrompt').assemble({ scope: key })
+    assert.match(prompt.sections.map(section => section.text).join('\n'), /Use mcp__teamharness__task for the common Task operations/)
     assert.match(prompt.sections.map(section => section.text).join('\n'), /Delivery and acceptance are not yet confirmed/)
     assert.equal(oldCalls, 0)
     assert.equal((await execute({ action: 'submit', taskId: 'foreign', summary: 'wrong' })).isError, true)

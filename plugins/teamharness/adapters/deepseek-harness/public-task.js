@@ -10,7 +10,7 @@ import { checkpointInput } from './session-receipt.js'
 import { traceCarrier } from './native-trace.js'
 
 const TASK = 'mcp__teamharness__task'
-const LEGACY = new Set(['mcp__teamharness__taskflow', 'mcp__teamharness__projectflow', 'mcp__teamharness__filesync'])
+const NON_CANONICAL = new Set(['task', 'mcp__teamharness__taskflow', 'mcp__teamharness__projectflow', 'mcp__teamharness__filesync'])
 
 export function nativeCall(payload, signal) {
   return new Promise((resolve, reject) => {
@@ -137,12 +137,13 @@ export async function installPublicTask(agentCtx, state) {
   const tools = agentCtx.get('tools')
   const schema = await state.call({ operation: 'schema', role: state.context.role })
   const restrict = Boolean(state.context.planning || state.context.review || state.context.completion)
-  const denied = tools.schemas().map(tool => tool.name).filter(name => name !== TASK && (restrict || LEGACY.has(name)))
+  const denied = tools.schemas().map(tool => tool.name).filter(name => name !== TASK && (restrict || NON_CANONICAL.has(name)))
   if (denied.length) tools.restrict({ deny: denied })
   const skill = readFileSync(join(process.env.AGENTTEAMS_PLUGIN_DIR, 'skills/team/task-management/SKILL.md'), 'utf8')
   const receipts = new Map()
   agentCtx.get('systemPrompt').section({ name: 'teamharness:public-task', order: 21,
-    text: () => [skill, state.context.fact, state.context.context ? JSON.stringify(state.context.context) : '',
+    text: () => [`Use ${TASK} for the common Task operations described below.`, skill, state.context.fact,
+      state.context.context ? JSON.stringify(state.context.context) : '',
       state.context.roster ? '[Registered public team identities]\n' + JSON.stringify(state.context.roster) : '',
       '[Task input references]\n' + JSON.stringify(state.context.sources), ...receipts.values()].filter(Boolean).join('\n\n') })
   const definition = { name: TASK, description: schema.description, parameters: schema.inputSchema,
