@@ -9,6 +9,7 @@ import os
 import re
 import signal
 import shutil
+import socket
 import subprocess
 import threading
 import tempfile
@@ -438,6 +439,29 @@ class MissingNativeSession(RuntimeError):
 
 
 def _execute_dsh(task, workspace, timeout_seconds, environment, poll_control, event_id, session_id):
+    control_directory = tempfile.TemporaryDirectory(prefix="at-dsh-")
+    control_path = str(Path(control_directory.name) / "control.sock")
+    environment["TEAMHARNESS_DSH_CONTROL_SOCKET"] = control_path
+
+    def steer(event):
+        try:
+            with socket.socket(socket.AF_UNIX) as connection:
+                connection.settimeout(15)
+                connection.connect(control_path)
+                connection.sendall((json.dumps(event) + "\n").encode())
+                response = b""
+                while b"\n" not in response:
+                    part = connection.recv(4096)
+                    if not part:
+                        raise RuntimeError("Native steering receipt was lost")
+                    response += part
+                receipt = json.loads(response)
+                if receipt.get("error"):
+                    raise RuntimeError(receipt["error"])
+                return receipt["accepted"]
+        except (FileNotFoundError, ConnectionRefusedError):
+            return None  # Native startup/cleanup boundary; retain the input.
+
     process = subprocess.Popen(
         ["agentteams-dsh", task],
         cwd=workspace,
@@ -454,7 +478,7 @@ def _execute_dsh(task, workspace, timeout_seconds, environment, poll_control, ev
                 stdout, stderr = process.communicate(timeout=0.5)
                 break
             except subprocess.TimeoutExpired:
-                if poll_control and poll_control():
+                if poll_control and poll_control(steer):
                     raise InterruptedError("Direct conversation stopped")
                 if STOP.is_set():
                     raise InterruptedError("Worker is shutting down")
@@ -474,6 +498,7 @@ def _execute_dsh(task, workspace, timeout_seconds, environment, poll_control, ev
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+        control_directory.cleanup()
     for line in stderr.splitlines():
         if line.startswith('[agentteams-native-event] '):
             try:
@@ -594,7 +619,7 @@ def recover_tasks(client, state, worker_name, workspace, timeout_seconds, own_us
             "room_id": task["room_id"], "sender": source["sender"] if source else own_user_id,
             "source_event_ids": [source["event_id"]] if source else [],
             "protocol_meta": (source or {}).get("_task_protocol_meta") or {"otel_carrier": (source or {}).get("otel_carrier", {})},
-            "poll_control": lambda: task_stopped(recovery, task_id, team, task["execution"]),
+            "poll_control": lambda _steer: task_stopped(recovery, task_id, team, task["execution"]),
             "source_key": source_key, "attach_only": attach_only, "identity": {"team_id": team, "task_id": task_id,
                 **{field: task["execution"][field] for field in ("generation", "instance_id", "process_id")}}}
         # Keep native file permissions scoped to this assigned Task, matching
@@ -727,7 +752,7 @@ def recover_message(client, matrix, sessions, source, own, agents, worker, works
     def new_prompt():
         history = raw_room_history(client, matrix, own, source["room_id"], source["event_id"], admit)
         return task + ("\nEarlier Matrix messages:\n" + json.dumps(history, ensure_ascii=False) if history else "")
-    def stopped():
+    def stopped(steer):
         from task_recovery import RecoveryUnavailable
         try:
             current = matrix._message_owned(identity)
@@ -735,7 +760,7 @@ def recover_message(client, matrix, sessions, source, own, agents, worker, works
             return False
         except RecoveryConflict:
             return True
-        return current["execution"]["state"] in {"cancelled", "released"} or bool(poll_control and poll_control(identity))
+        return current["execution"]["state"] in {"cancelled", "released"} or bool(poll_control and poll_control(identity, steer))
     before = snapshot_outbox(workspace)
     kwargs = dict(session_id=ref, resume=reuse, identity=identity, source_key=key,
         room_id=source["room_id"], sender=source["sender"], source_event_ids=[source["event_id"]],
@@ -811,11 +836,12 @@ def execution_status(client, event, status, message_id=None):
             "completed": "本轮已结束", "failed": "执行失败",
         }[status],
         "com.agentteams.execution": {"run_id": event["event_id"], "status": status,
-            "capabilities": ["stop", "steer"], **({"message_id": message_id} if message_id else {})},
+            "capabilities": ["stop", "steer"], "steering_mode": "native",
+            **({"message_id": message_id} if message_id else {})},
     }, f"{event['event_id']}:execution:{status}")
 
 
-def poll_direct_control(client, since, active, state, own_user_id, room_types, agent_user_ids, allowed_senders):
+def poll_direct_control(client, since, active, state, own_user_id, room_types, agent_user_ids, allowed_senders, steer=None):
     # Do not advance the durable cursor here: ordinary messages must still be
     # ingested by the outer loop after this native process has exited.
     payload = client.sync(since, 0)
@@ -831,6 +857,23 @@ def poll_direct_control(client, since, active, state, own_user_id, room_types, a
             controls.append(event)
     if not controls:
         return False
+    if steer:
+        for event in controls[:]:
+            if event["execution_control"]["action"] != "steer":
+                continue
+            if not event["body"].strip():
+                state.mark_completed(event["event_id"], "")
+                controls.remove(event)
+                continue
+            accepted = steer(event)
+            if accepted is None:
+                controls.remove(event)  # Retry after native startup, without interrupting.
+            elif accepted:
+                state.mark_completed(event["event_id"], "")
+                controls.remove(event)
+        state.save()
+        if not controls:
+            return False
     inputs = state.data["events"][active["event_id"]].get("direct_inputs", [active["body"]])
     input_ids = state.data["events"][active["event_id"]].get("direct_input_ids", [active["event_id"]])
     supplements = []
@@ -955,7 +998,7 @@ def run_managed_worker(client, worker, runtime_path, workspace, timeout, own, st
                 "native_committed": start.get("process_id") == recovery.process})
         return sources
 
-    def direct_controls(active, identity):
+    def direct_controls(active, identity, steer):
         # Poll the same durable feed while a direct model/tool process is live.
         snapshot, _ = receiver.poll(0)
         for event in pending_sources(snapshot):
@@ -973,6 +1016,16 @@ def run_managed_worker(client, worker, runtime_path, workspace, timeout, own, st
                 marker = "steer:" + event["source_key"]
                 steps = cp.get("completed_steps") or []
                 if marker not in steps:
+                    accepted = steer(event)
+                    if accepted is None:
+                        continue
+                    if accepted:
+                        cp.update(version=cp.get("version", 0) + 1, completed_steps=[*steps, marker])
+                        matrix.message_checkpoint(identity, cp)
+                        control_turn = matrix.message_claim(event["source_key"])
+                        if control_turn["recovery"] == "resume":
+                            matrix.message_cancel(control_turn["identity"])
+                        continue
                     cp.update(version=cp.get("version", 0) + 1, completed_steps=[*steps, marker],
                               remaining_steps=[*(cp.get("remaining_steps") or []), event["body"]])
                     matrix.message_checkpoint(identity, cp)
@@ -1025,7 +1078,7 @@ def run_managed_worker(client, worker, runtime_path, workspace, timeout, own, st
                         direct = direct_member(client, source, own, rooms, agents)
                         recover_message(client, matrix, sessions, source, own, agents, worker, workspace, timeout,
                             admit=lambda room, raw: classify(room, raw) == ("message", None),
-                            poll_control=(lambda identity: direct_controls(source, identity)) if direct else None)
+                            poll_control=(lambda identity, steer: direct_controls(source, identity, steer)) if direct else None)
                     except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as error:
                         trace_event("inference.interrupted", event_id=source["event_id"], error=str(error)[:1024])
         except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as error:
@@ -1152,7 +1205,7 @@ def main() -> int:
                             resume=resume,
                             event_id=event["event_id"],
                             attempt=attempts,
-                            poll_control=(lambda: poll_direct_control(client, since, event, state, own_user_id, room_types, agent_user_ids, allowed_senders)) if direct else None,
+                            poll_control=(lambda steer: poll_direct_control(client, since, event, state, own_user_id, room_types, agent_user_ids, allowed_senders, steer)) if direct else None,
                             room_id=event["room_id"],
                             sender=event["sender"],
                             source_event_ids=state.data["events"][event["event_id"]].get("direct_input_ids", [event["event_id"]]),

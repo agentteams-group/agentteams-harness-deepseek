@@ -24,6 +24,7 @@
     "runner.js",
     "runtime-logging.js",
     "session-receipt.js",
+    "steering.js",
     "matrix-interactions.js",
     "turn.js",
     "cordis.patch.yml"
