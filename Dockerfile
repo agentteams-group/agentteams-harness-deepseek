@@ -5,6 +5,13 @@ FROM ${HIGRESS_REGISTRY}/higress/mc:20260216 AS mc
 
 FROM ${AGENTTEAMS_CONTROLLER_IMAGE} AS controller
 
+# Build the public CLI from the same pinned Core as the protocol assets.
+FROM higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/golang:1.26-alpine AS public-cli
+WORKDIR /build
+COPY --from=agentteams /agentteams-controller/ ./
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -o /out/agt ./cmd/agt && /out/agt assistant --help > /dev/null
+
 FROM node:24-bookworm-slim
 
 ARG DSH_VERSION=0.1.1-rc.2
@@ -30,7 +37,7 @@ RUN python3 -m venv /opt/venv/agentteams \
     && /opt/venv/agentteams/bin/pip install --no-cache-dir -r /opt/agentteams/scripts/lib/telemetry/requirements.txt openai==2.54.0
 ENV PATH="/opt/venv/agentteams/bin:${PATH}" \
     TEAMHARNESS_PYTHON=/opt/venv/agentteams/bin/python3
-COPY --from=controller /usr/local/bin/agt /usr/local/bin/agt
+COPY --from=public-cli /out/agt /usr/local/bin/agt
 
 COPY package.json /opt/agentteams/dsh/package.json
 # Keep rc.2's Cordis services at its tested source snapshot versions.

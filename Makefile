@@ -7,7 +7,7 @@ AT_SOURCE ?= https://github.com/agentscope-ai/AgentTeams.git\#$(AT_REF)
 SHARED_CONTEXT ?= $(AT_SOURCE):shared/lib
 TEAMHARNESS_CONTEXT ?= $(AT_SOURCE):plugins/teamharness
 DOCKER_BUILD_ARGS ?=
-BUILD_ARGS = --build-context shared=$(SHARED_CONTEXT) --build-context teamharness=$(TEAMHARNESS_CONTEXT) --build-arg DSH_VERSION=$(DSH_VERSION) $(DOCKER_BUILD_ARGS)
+BUILD_ARGS = --build-context agentteams=$(AT_SOURCE) --build-context shared=$(SHARED_CONTEXT) --build-context teamharness=$(TEAMHARNESS_CONTEXT) --build-arg DSH_VERSION=$(DSH_VERSION) $(DOCKER_BUILD_ARGS)
 
 .PHONY: test build push smoke
 test:
