@@ -61,6 +61,7 @@ export async function preparePublicTask(frame, call = nativeCall) {
       throw new Error('Public Task context is unavailable; no model turn was started')
     }
     Object.assign(context, prepared)
+    if (event.kind === 'assistant_digest') return undefined
   }
   const state = { context, phase, pending: [], call }
   if (['manager', 'leader', 'team_leader'].includes(frame.role)) {
