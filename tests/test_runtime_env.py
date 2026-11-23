@@ -70,18 +70,21 @@ class WorkerProjectionTests(unittest.TestCase):
             path = Path(directory) / "runtime.yaml"
             path.write_text("""apiVersion: agentteams.io/v1beta1
 kind: MemberRuntimeConfig
-member: {runtime: deepseek-harness, runtimeName: a, matrixUserId: '@a:test'}
+member: {runtime: deepseek-harness, runtimeName: a, matrixUserId: '@a:test', role: team_leader}
+team: {name: protocol-team}
 matrix: {transport: {homeserver: 'https://worker-matrix', encryption: false}}
 desired: {model: {model: shared-model, gatewayUrl: 'https://worker-gateway'}}
 storage: {memberPrefix: agents/a}
 credentials: {gatewayKeyEnv: MODEL_BINDING, matrixTokenEnv: MATRIX_BINDING}
 """)
             with patch.dict(os.environ, {"AGENTTEAMS_CONTROLLER_URL": "http://controller", "MODEL_BINDING": "gateway-test",
-                    "MATRIX_BINDING": "matrix-test", "DEEPSEEK_BASE_URL": "https://stale", "DEEPSEEK_API_KEY": "stale"}, clear=True):
+                    "MATRIX_BINDING": "matrix-test", "AGENTTEAMS_AGENT_ROLE": "standalone", "DEEPSEEK_BASE_URL": "https://stale", "DEEPSEEK_API_KEY": "stale"}, clear=True):
                 env = runtime_env.worker_environment(path, "a")
                 self.assertEqual(env, {"TEAMHARNESS_DSH_MODEL": "shared-model", "DEEPSEEK_BASE_URL": "https://worker-gateway/v1",
                     "DEEPSEEK_API_KEY": "gateway-test", "AGENTTEAMS_MATRIX_URL": "https://worker-matrix",
-                    "AGENTTEAMS_WORKER_MATRIX_TOKEN": "matrix-test", "AGENTTEAMS_MATRIX_USER_ID": "@a:test"})
+                    "AGENTTEAMS_WORKER_MATRIX_TOKEN": "matrix-test", "AGENTTEAMS_MATRIX_USER_ID": "@a:test",
+                    "AGENTTEAMS_AGENT_ROLE": "team_leader", "AGENTTEAMS_WORKER_ROLE": "team_leader",
+                    "AGENTTEAMS_TEAM_NAME": "protocol-team"})
                 with self.assertRaisesRegex(ValueError, "identity"):
                     runtime_env.worker_environment(path, "another")
                 path.write_text(path.read_text().replace("encryption: false", "encryption: true"))

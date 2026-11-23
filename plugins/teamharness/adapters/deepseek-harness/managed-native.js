@@ -31,21 +31,22 @@ export async function commitMatrixSource(session, event, persistence, eventKey, 
 
 export function checkExecution(identity, rpc = recoveryCall) {
   const message = Boolean(identity.event_key)
-  const result = rpc(message ? 'matrix.message.current' : 'current', { identity })
+  const result = rpc(message ? 'matrix.message.current' : 'admit_tools', { identity })
   if (!message && (result.task.execution.state !== 'active' || result.task.execution.runtime !== 'deepseek-harness')) {
     throw new Error('Task execution lost ownership')
   }
   return result
 }
 
-export function installExecutionGuard(ctx, agent, identity, beforeRequest, rpc = recoveryCall) {
+export function installExecutionGuard(ctx, agent, identity, beforeRequest, rpc = recoveryCall, isCanonicalTask = () => false) {
   const message = Boolean(identity.event_key)
+  const tools = ctx.get?.('tools')
+  const fileWrite = tools?.get('write')
   ctx.on('agent/request', async (_request, next) => {
     await beforeRequest()
     checkExecution(identity, rpc)
     return next()
   })
-  if (!message) return
   // DSH can schedule independent tools concurrently. The shared execution has
   // a single in-flight operation, so reserve one before each top-level body.
   let queue = Promise.resolve()
@@ -62,16 +63,27 @@ export function installExecutionGuard(ctx, agent, identity, beforeRequest, rpc =
     }
     const run = queue.then(async () => {
       await beforeRequest()
+      if (!message) checkExecution(identity, rpc)
+      if (isCanonicalTask(execution)) return next()
       const call = { id: execution.callId, name: execution.name, arguments: execution.arguments }
-      const operation_id = rpc('matrix.message.begin_tools', { identity, calls: [call] })
+      // DSH's local writer refuses an unobserved overwrite before modifying the target.
+      if (call.name === 'write' && fileWrite && tools.get(call.name, agent) === fileWrite) {
+        call.pre_effect_error_codes = ['FS_NOT_OBSERVED']
+      }
+      const operation_id = rpc(message ? 'matrix.message.begin_tools' : 'begin_tools', { identity, calls: [call] })
       active = execution.rootCallId || call.id
       uncertain = false
       try {
         const result = await next()
-        if (uncertain || !result || (result.isError && call.name !== 'read') || execution.signal?.aborted || !Array.isArray(result.content)) {
+        const code = result?.error?.info?.code
+        const refused = result?.isError === true && call.pre_effect_error_codes?.includes(code)
+        if (uncertain || !result || (result.isError && call.name !== 'read' && !refused)
+            || execution.signal?.aborted || !Array.isArray(result.content)) {
           throw new Error('Native tool result is unconfirmed')
         }
-        rpc('matrix.message.finish_tools', { identity, operation_id, results: [{ id: call.id, content: result.content, isError: result.isError === true }] })
+        const receipt = { id: call.id, content: result.content, isError: result.isError === true }
+        if (refused) Object.assign(receipt, { status: 'error', effect: 'none', error_code: code })
+        rpc(message ? 'matrix.message.finish_tools' : 'finish_tools', { identity, operation_id, results: [receipt] })
         return result
       } finally {
         active = undefined

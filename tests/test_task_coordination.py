@@ -11,11 +11,13 @@ class CoordinationTest(unittest.TestCase):
     def packet(self, **content):
         return {'rooms': {'join': {'!task:test': {'timeline': {'events': [{'type': 'm.room.message', 'event_id': '$event', 'sender': '@self:test', 'content': {'msgtype': 'm.text', 'body': 'projection', **content}}]}}}}}
     def test_verified_self_closure_preserves_its_isolated_session(self):
-        helper = SimpleNamespace(notification=Mock(return_value={'text': 'Canonical closure', 'session_id': 'coordination-close-task:main'}), IgnoredNotification=ValueError)
+        verified = {'teamharness_coordination': {'kind': 'main_task_ready', 'main_task_id': 'main'}}
+        helper = SimpleNamespace(notification=Mock(return_value={'text': 'Canonical closure', 'session_id': 'coordination-close-task:main', 'meta': verified}), IgnoredNotification=ValueError)
         with patch.dict(sys.modules, {'task_coordination': helper}):
             events = matrix_events(self.packet(**{'org.agentteams.coordination': {}}), {'!task:test': 'team'}, '@self:test')
         self.assertEqual(events[0]['body'], 'Canonical closure')
         self.assertEqual(events[0]['coordination_session'], 'coordination-close-task:main')
+        self.assertEqual(events[0]['_task_protocol_meta']['teamharness_coordination'], verified['teamharness_coordination'])
         self.assertEqual(matrix_events(self.packet(), {'!task:test': 'team'}, '@self:test'), [])
     def test_bad_control_never_falls_back_to_visible_body(self):
         helper = SimpleNamespace(notification=Mock(side_effect=ValueError('wrong scope')), IgnoredNotification=ValueError)

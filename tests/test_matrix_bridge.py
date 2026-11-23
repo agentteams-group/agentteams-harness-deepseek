@@ -172,6 +172,7 @@ class TextEventsTest(unittest.TestCase):
                     "event_id": "$task",
                     "sender": "@admin:matrix.local",
                     "body": "do the task",
+                    "otel_carrier": {},
                 }
             ],
         )

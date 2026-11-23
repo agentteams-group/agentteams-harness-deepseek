@@ -11,10 +11,15 @@ test('native steering is ordered, persisted and deduplicated without cancellatio
   const path = join(directory, 'control.sock')
   const received = []
   let flushed = 0
+  const persistedSources = []
   const agent = { status: 'running', steer: message => received.push(message) }
   const server = await openSteering(path, agent, {
     message: request => ({ id: request.event_id, text: request.body }),
     flush: async () => { flushed++ },
+    beforeSteer: async request => {
+      persistedSources.push(request.event_id)
+      if (request.event_id === '$race') agent.status = 'idle'
+    },
   })
   const send = request => new Promise((resolve, reject) => {
     const socket = connect(path)
@@ -31,6 +36,10 @@ test('native steering is ordered, persisted and deduplicated without cancellatio
     }
     assert.deepEqual(received, [{ id: '$one', text: '$one' }, { id: '$two', text: '$two' }])
     assert.equal(flushed, 2)
+    assert.deepEqual(persistedSources, ['$one', '$two'])
+    assert.deepEqual(await send({ event_id: '$race', body: 'persisted before native completion' }), { accepted: false })
+    assert.equal(flushed, 2)
+    assert.deepEqual(persistedSources, ['$one', '$two', '$race'])
     agent.status = 'idle'
     assert.deepEqual(await send({ event_id: '$late', body: 'late' }), { accepted: false })
     assert.equal(received.length, 2)
