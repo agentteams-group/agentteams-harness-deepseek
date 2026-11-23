@@ -5,7 +5,7 @@ import sys
 import unittest
 
 root = Path(__file__).resolve().parents[1]
-core = Path(os.environ["AT_SOURCE"])
+core = Path(os.environ.get("AT_SOURCE", Path(__file__).resolve().parents[2]))
 sys.path[:0] = [str(root / "scripts"), str(core / "shared/lib"), str(core / "tests/lib")]
 from assistant_fixture import AssistantFixture
 from matrix_bridge import managed_matrix_event
