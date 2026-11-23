@@ -8,10 +8,20 @@ root = Path(__file__).resolve().parents[1]
 core = Path(os.environ.get("AT_SOURCE", Path(__file__).resolve().parents[2]))
 sys.path[:0] = [str(root / "scripts"), str(core / "shared/lib"), str(core / "tests/lib")]
 from assistant_fixture import AssistantFixture
-from matrix_bridge import managed_matrix_event
+from matrix_bridge import managed_matrix_event, deliver_managed_message
+from unittest.mock import Mock
 
 
 class AssistantProtocolTest(unittest.TestCase):
+    def test_background_outcome_never_publishes_a_native_reply(self):
+        client, matrix = Mock(), Mock()
+        identity = {"event_key":"assistant"}
+        deliver_managed_message(client, matrix, {"identity":identity,"saved_result":"Nothing new"},
+            {"coordination_session":"coordination-assistant:cycle"}, "@leader:test", set())
+        matrix.message_cancel.assert_called_once_with(identity)
+        client.request.assert_not_called()
+        matrix.message_delivered.assert_not_called()
+
     def test_standard_self_mention_uses_controller_context_and_old_owner_is_rejected(self):
         with AssistantFixture() as f:
             source = {"room_id": f.room, "input": {"sender": f.own, "content": f.content()}}
