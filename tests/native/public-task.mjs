@@ -13,6 +13,21 @@ import { JsonlSessionPersistence } from '@deepseek-ai/dsh-session-persistence-js
 const { nativeCall, preparePublicTask, installPublicTask, persistRefreshedInputs, persistDeliveryContext } = await import(
   process.env.AGENTTEAMS_PUBLIC_TASK_MODULE ?? new URL('../../plugins/teamharness/adapters/deepseek-harness/public-task.js', import.meta.url).href)
 
+test('assistant control input does not bind a business Task roster or tools', async () => {
+  const calls = []
+  const state = await preparePublicTask({ role: 'team_leader', team: 'DeepSeek Harness 验收',
+    meta: { event_id: '$assistant', room_id: '!assistant:test',
+      teamharness_coordination: { id: 'assistant-notice', kind: 'assistant_digest' } } }, async request => {
+    calls.push(request.operation)
+    if (request.operation === 'sources') return []
+    if (request.operation === 'prepare_event') return {}
+    assert.fail('Assistant input must not load Task roster or schema: ' + request.operation)
+  })
+  assert.equal(state, undefined)
+  assert.deepEqual(calls, ['sources', 'prepare_event'])
+  await installPublicTask({ get() { assert.fail('Assistant input must not install Task tools') } }, state)
+})
+
 test('real DSH scope shadows old MCP Task, restricts legacy tools and preserves the common receipt', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-public-task-'))
   const ctx = new Context()

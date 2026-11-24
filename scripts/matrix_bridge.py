@@ -707,6 +707,8 @@ def deliver_managed_message(client, matrix, claim, source, own, agents):
     from worker_matrix_raw import publish_raw_saved
 
     identity, text = claim["identity"], claim["saved_result"]
+    if source.get("coordination_session", "").startswith("coordination-assistant:"):
+        return matrix.message_cancel(identity)
     content = {"m.relates_to": {"m.in_reply_to": {"event_id": source["event_id"]}}}
     relation = (claim["input"]["input"]["content"].get("m.relates_to") or {})
     if relation.get("rel_type") == "m.thread" and relation.get("event_id"):
@@ -776,7 +778,7 @@ def recover_message(client, matrix, sessions, source, own, agents, worker, works
     matrix.message_current(identity)
     sync_sessions(worker)
     outputs = changed_outbox_files(workspace, before)
-    if not outputs and text.strip() == "NO_REPLY":
+    if source.get("coordination_session", "").startswith("coordination-assistant:") or not outputs and text.strip() == "NO_REPLY":
         matrix.message_cancel(identity)
         return
     if outputs:
@@ -1221,6 +1223,11 @@ def main() -> int:
                     else:
                         answer, output_paths = cached_answer
 
+                    if event.get("coordination_session", "").startswith("coordination-assistant:"):
+                        state.mark_completed(event["event_id"], "")
+                        state.save()
+                        push_runtime_state(worker_name, state_path)
+                        continue
                     restore_output_paths(worker_name, workspace, output_paths)
                     source_agent = source_agent_reply_user_id(event, agent_user_ids, own_user_id)
                     reply_mentions = reply_mention_user_ids(event, answer, agent_user_ids, own_user_id)
