@@ -102,6 +102,7 @@ export class MatrixInteractions {
         if (!response || !Array.isArray(response.selected) || new Set(response.selected).size !== response.selected.length
           || (!question.multiSelect && response.selected.length > 1)) return
         if (response.selected.some(value => !question.options?.some(o => o.label === value))) return
+        if (response.custom !== undefined && typeof response.custom !== 'string') return
         if (!response.selected.length && !(typeof response.custom === 'string' && response.custom.trim())) return
         answers.push({ id: question.id, selected: response.selected, custom: response.custom })
       }

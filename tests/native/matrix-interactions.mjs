@@ -34,7 +34,7 @@ for (const [action, expected, requester, admin] of [
         const body = `/agentteams-approval ${action} ${pending.request_id} ${pending.context_id}`
         // Wrong room, sender and context are ignored before the valid answer.
         const content = { body: 'Human decision', 'com.agentteams.answer': {
-          kind: 'tool_approval', agent_id: '@worker', confirmation_id: pending.request_id,
+          kind: 'tool_approval', agent_id: syncs === 3 ? '@other' : '@worker', confirmation_id: pending.request_id,
           context_id: syncs === 2 ? 'stale' : pending.context_id,
           answer: action === 'approve' ? 'approved' : 'rejected',
         } }
@@ -103,8 +103,9 @@ test('native question service receives exact multi-select and custom answers', a
         return Response.json({ event_id: '$question' })
       }
       const content = card ? { 'com.agentteams.answer': {
+        kind: 'ask_user', agent_id: syncs === 2 ? '@other' : '@worker',
         confirmation_id: card.confirmation_id,
-        responses: [{ id: 'multi', selected: ['甲', '乙'] }, { id: 'free', selected: [], custom: '补充内容' }],
+        responses: [{ id: 'multi', selected: ['甲', '乙'], ...(syncs === 1 ? { custom: {} } : {}) }, { id: 'free', selected: [], custom: '补充内容' }],
       } } : {}
       return Response.json({ next_batch: String(++syncs), rooms: { join: { '!room': { timeline: { events: [{ type: 'm.room.message', sender: '@owner', content }] } } } } })
     },
@@ -113,5 +114,31 @@ test('native question service receives exact multi-select and custom answers', a
     { id: 'multi', question: '选择范围', multiSelect: true, options: [{ label: '甲' }, { label: '乙' }] },
     { id: 'free', question: '补充说明' },
   ] }), { answers: [{ id: 'multi', selected: ['甲', '乙'], custom: undefined }, { id: 'free', selected: [], custom: '补充内容' }] })
+  assert.ok(syncs >= 4, 'invalid custom values and another Agent target must not resume the question')
+  await ctx.registry.delete(UserQuestionService)
+})
+
+test('question receipt failure does not discard an accepted native answer', async () => {
+  const ctx = new Context()
+  await ctx.plugin(UserQuestionService).await()
+  let card
+  installMatrixInteractions(ctx, {
+    url: 'http://matrix.test', token: 'test', room: '!room', sender: '@owner',
+    request: async (_url, options) => {
+      if (options.method === 'PUT') {
+        const block = JSON.parse(options.body)['org.agentteams.run'].blocks[0]
+        if (block.status !== 'pending') throw new Error('receipt transport unavailable')
+        card = block
+        return Response.json({ event_id: '$question' })
+      }
+      return Response.json({ next_batch: 'next', rooms: { join: { '!room': { timeline: { events: card ? [{
+        type: 'm.room.message', sender: '@owner', content: { 'com.agentteams.answer': {
+          confirmation_id: card.confirmation_id, responses: [{ id: 'free', selected: [], custom: 'Continue' }],
+        } },
+      }] : [] } } } } })
+    },
+  })
+  assert.deepEqual(await ctx.userQuestions.ask({ questions: [{ id: 'free', question: 'Explain' }] }),
+    { answers: [{ id: 'free', selected: [], custom: 'Continue' }] })
   await ctx.registry.delete(UserQuestionService)
 })
