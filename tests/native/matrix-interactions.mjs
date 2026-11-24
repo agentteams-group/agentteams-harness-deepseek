@@ -6,6 +6,7 @@ import { ApprovalService } from '@deepseek-ai/dsh-user-approval'
 import { UserQuestionService } from '@deepseek-ai/dsh-user-questions'
 const { installMatrixInteractions } = await import(process.env.AGENTTEAMS_INTERACTIONS_MODULE
   ?? new URL('../../plugins/teamharness/adapters/deepseek-harness/matrix-interactions.js', import.meta.url).href)
+process.env.AGENTTEAMS_MATRIX_USER_ID = '@worker'
 
 for (const [action, expected, requester, admin] of [
   ['approve', 'allowed-once', '@owner', undefined],
@@ -32,7 +33,11 @@ for (const [action, expected, requester, admin] of [
         if (!pending) return Response.json({ next_batch: 'initial' })
         const body = `/agentteams-approval ${action} ${pending.request_id} ${pending.context_id}`
         // Wrong room, sender and context are ignored before the valid answer.
-        const content = { body: syncs === 2 ? body.replace(pending.context_id, 'stale') : `@worker ${body}` }
+        const content = { body: 'Human decision', 'com.agentteams.answer': {
+          kind: 'tool_approval', agent_id: '@worker', confirmation_id: pending.request_id,
+          context_id: syncs === 2 ? 'stale' : pending.context_id,
+          answer: action === 'approve' ? 'approved' : 'rejected',
+        } }
         return Response.json({ next_batch: String(syncs), rooms: { join: {
           '!other': { timeline: { events: [{ type: 'm.room.message', sender: '@owner', content: { body } }] } },
           '!room': { timeline: { events: [
