@@ -115,7 +115,7 @@ export class MatrixInteractions {
     } finally {
       await this.send({ msgtype: 'm.text', body: `Question ${status}`,
         'org.agentteams.run': { version: '1', blocks: [{ type: 'confirmation', tool_name: 'ask_human',
-          confirmation_id: id, status }] } })
+          confirmation_id: id, status }] } }).catch(error => console.error('Matrix question receipt:', error.message))
     }
   }
 
