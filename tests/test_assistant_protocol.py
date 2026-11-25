@@ -24,7 +24,7 @@ class AssistantProtocolTest(unittest.TestCase):
 
     def test_standard_self_mention_uses_controller_context_and_old_owner_is_rejected(self):
         with AssistantFixture() as f:
-            source = {"room_id": f.room, "input": {"sender": f.own, "content": f.content()}}
+            source = {"room_id": f.room, "event_id": "$assistant", "input": {"sender": f.own, "content": f.content()}}
             def receive():
                 return managed_matrix_event(source, {f.room: "personal"}, f.own, set(), {"dm": {"policy": "allowlist", "allowFrom": ["@admin:test"]}})
             intent, task, event = receive()
