@@ -26,7 +26,7 @@ test('native session tool events publish exact IDs, arguments, results and edits
   session.append('tool/call', {turn: 1, step: 1, callId: 'read-2', name: 'read', arguments: '{"path":"missing.html"}'})
   const result = (id, text, isError) => ({turn: 1, step: 1, message: {role: 'user', source: {kind: 'tool', callId: id},
     content: [{type: 'tool-result', toolCallId: id, isError, content: [{type: 'text', text}]}]}})
-  session.append('tool/result', result('read-2', 'not found', true), {surfaceOp: 'append'})
+  session.append('tool/result', result('read-2', 'not found; Authorization: Bearer unknown-private-token', true), {surfaceOp: 'append'})
   session.append('tool/result', result('read-1', '<html>ok</html>', false), {surfaceOp: 'append'})
   session.append('turn/end', {turn: 1, reason: {kind: 'completed'}})
   await transport.flush()
@@ -41,6 +41,7 @@ test('native session tool events publish exact IDs, arguments, results and edits
   assert.equal(blocks[4].result[0].text, '<html>ok</html>')
   assert.equal(sent[3]['m.relates_to'].event_id, '$3')
   assert.equal(sent[4]['m.relates_to'].event_id, '$2')
+  assert.ok(!JSON.stringify(sent).includes('unknown-private-token'))
   for (const outer of sent) {
     const content = outer['m.new_content'] ?? outer
     assert.equal(content['org.agentteams.progress_only'], true)

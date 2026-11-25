@@ -20,8 +20,14 @@ export class MatrixProgress {
     if (Array.isArray(value)) return value.map(item => this.safe(item))
     if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, this.safe(item, name)]))
     if (typeof value === 'string') {
+      try {
+        const parsed = JSON.parse(value)
+        if (parsed && typeof parsed === 'object') return JSON.stringify(this.safe(parsed))
+      } catch {}
       for (const secret of this.secrets) value = value.split(secret).join('[REDACTED]')
       return value.replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, 'Bearer [REDACTED]')
+        .replace(/((?:access_token|api_key|apiKey|password|secret|authorization)["']?\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,}]+)/gi, '$1"[REDACTED]"')
+        .replace(/(https?:\/\/)[^/\s@]+@/g, '$1[REDACTED]@')
     }
     return value
   }
@@ -46,7 +52,7 @@ export class MatrixProgress {
     } catch (error) {
       if (error.status !== 404 || error.code !== 'M_NOT_FOUND') throw error
     }
-    const content = { msgtype: 'm.notice', body: block.type === 'thinking' ? block.content : `${block.tool_name} · ${block.status}`,
+    const content = { msgtype: 'm.notice', body: block.type === 'thinking' ? block.content : block.tool_name ? `${block.tool_name} · ${block.status}` : '执行过程',
       'org.agentteams.progress_only': true, 'm.mentions': { user_ids: [] },
       'org.agentteams.run': { version: '1', run_id: this.runId, blocks: [block] } }
     return this.transport.send(previous ? { ...content, 'm.new_content': content,
