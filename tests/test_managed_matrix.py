@@ -122,7 +122,8 @@ class ManagedMatrixTest(unittest.TestCase):
         rec.discover.side_effect = lambda: order.append("discover") or {"tasks":[]}
         self.client.request.return_value = {"joined_rooms": ["!dm", "!unwatched"]}
         self.matrix.pending.return_value = [{**self.event, "intent":stored_intent}]
-        def receiver(matrix, client, own, classify, observe):
+        def receiver(matrix, client, own, classify, observe, *, event_types):
+            self.assertEqual(event_types, ("m.room.message", "org.agentteams.coordination"))
             def poll(_):
                 if "sync" in order:
                     stop.set()

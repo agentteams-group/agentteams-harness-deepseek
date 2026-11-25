@@ -402,6 +402,7 @@ def run_dsh(
             "TEAMHARNESS_DSH_SESSION_ID": session_id,
             "TEAMHARNESS_DSH_RESUME": "true" if resume else "false",
             "TEAMHARNESS_MATRIX_EVENT_ID": event_id,
+            "AGENTTEAMS_RUN_ID": progress_run_id(identity, room_id, event_id),
             "TEAMHARNESS_DSH_ATTEMPT": str(attempt),
             "TEAMHARNESS_MATRIX_ROOM_ID": room_id,
             "TEAMHARNESS_MATRIX_SENDER": sender,
@@ -551,8 +552,11 @@ def publish_task_reply(client, recovery, task, team, own_user_id, text):
     def bind(checkpoint):
         saved = recovery.checkpoint(task_id, team, checkpoint)["execution"]
         confirm_bound(saved, identity, "deepseek-harness", checkpoint)
+    run_id = progress_run_id({**identity, "task_id": task_id, "team_id": team})
     event_id = publish_raw_saved(client, task["room_id"], text, identity["checkpoint"], own_user_id, bind,
-        content={"org.agentteams.progress_only": True, "org.agentteams.run_id": progress_run_id({**identity, "task_id": task_id, "team_id": team})}, legacy_transaction_id=matrix_transaction_id)
+        content={"org.agentteams.progress_only": True, "org.agentteams.run_id": run_id,
+                 "org.agentteams.run": {"version": "1", "run_id": run_id, "blocks": [{"type": "text", "text": text}]}},
+        legacy_transaction_id=matrix_transaction_id)
     return recovery.delivered(task_id, team, event_id)
 
 
@@ -682,9 +686,11 @@ def managed_matrix_event(source, room_types, own, agents, transport):
     content, sender = raw.get("content") or {}, raw.get("sender")
     if not sender or raw.get("unsigned", {}).get("redacted_because"):
         return None
+    if raw.get("type") == "org.agentteams.coordination" and "org.agentteams.coordination" not in content:
+        return None
     if "org.agentteams.coordination" in content:
         try:
-            packet = notification(content, room, sender, own)
+            packet = notification(content, room, sender, own, event_id=source["event_id"])
         except IgnoredNotification:
             return None
         meta = packet["meta"]["teamharness_coordination"]
@@ -986,7 +992,7 @@ def run_managed_worker(client, worker, runtime_path, workspace, timeout, own, st
         native = managed_matrix_event(source, rooms, own, agents, transport)
         return native[:2] if native else None
 
-    receiver = RawWorkerSync(matrix, client, own, classify, observe)
+    receiver = RawWorkerSync(matrix, client, own, classify, observe, event_types=("m.room.message", "org.agentteams.coordination"))
     def pending_sources(snapshot):
         sources = []
         for row in matrix.pending(snapshot):

@@ -39,6 +39,31 @@ test('verified execution keeps its authenticated actor without binding another H
   assert.deepEqual(state.context.sources, [])
 })
 
+test('verified planning requires an overview before any Task mutation', async () => {
+  const ctx = new Context()
+  await ctx.plugin(SystemPrompt).await()
+  await ctx.plugin(ToolRuntime, { mode: 'native' }).await()
+  const agent = {}
+  const scoped = createScope(ctx, agent)
+  try {
+    let calls = 0
+    const state = { context: { role: 'team_leader', planning: ['main'], sources: [] }, pending: [],
+      call: async request => {
+        if (request.operation === 'schema') return nativeCall(request)
+        calls++
+        return { result: { ok: true }, refreshedInputs: [] }
+      } }
+    await installPublicTask(scoped.ctx, state)
+    await assert.rejects(() => state.nativeExecute({ action: 'plan', mainTaskId: 'main', overview: ' ' },
+      { signal: new AbortController().signal }), /overview/)
+    assert.equal(calls, 0)
+  } finally {
+    await scoped.dispose()
+    await ctx.registry.delete(ToolRuntime)
+    await ctx.registry.delete(SystemPrompt)
+  }
+})
+
 test('native terminal tool and stored receipt retain sent facts with silent presentation', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-terminal-facts-'))
   const ctx = new Context()

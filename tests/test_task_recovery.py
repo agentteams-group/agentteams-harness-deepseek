@@ -94,7 +94,10 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual(self.run.call_args.kwargs["source_event_ids"], [])
         self.assertEqual(self.recovery.resume_text.call_args.args[0]["spec"], "portable description")
         self.assertEqual(self.recovery.prepare_reply.call_args.args, ("stable", "team", "native callback"))
-        self.assertEqual(self.client.send_content.call_args.args[1]["body"], "canonical report")
+        content = self.client.send_content.call_args.args[1]
+        self.assertEqual(content["body"], "canonical report")
+        self.assertEqual(content["org.agentteams.run"]["blocks"], [{"type": "text", "text": "canonical report"}])
+        self.assertEqual(content["org.agentteams.run"]["run_id"], content["org.agentteams.run_id"])
         self.assertEqual(self.client.send_content.call_args.args[2], "stable-transaction")
         self.assertEqual(self.state.next_batch, "retained-cursor")
         self.assertEqual(self.state.data["events"]["$backlog"]["status"], "queued")

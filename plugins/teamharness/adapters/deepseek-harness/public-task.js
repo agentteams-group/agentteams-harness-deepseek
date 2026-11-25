@@ -158,12 +158,17 @@ export async function installPublicTask(agentCtx, state) {
     ? await state.call({ operation: 'model_context', context: state.context.context }) : undefined
   agentCtx.get('systemPrompt').section({ name: 'teamharness:public-task', order: 21,
     text: () => [`Use ${TASK} for the common Task operations described below.`, skill, state.context.fact,
+      state.context.planning ? '先规划节点。调用 plan 时用中文填写 overview，向任务房间说明任务目标、验收标准、节点分工及交付物。' : '',
       modelContext ? JSON.stringify(modelContext) : '',
       state.context.roster ? '[Registered public team identities]\n' + JSON.stringify(state.context.roster) : '',
       '[Task input references]\n' + JSON.stringify(state.context.sources), ...receipts.values()].filter(Boolean).join('\n\n') })
   const definition = { name: TASK, description: schema.description, parameters: schema.inputSchema,
     output: { schema: { type: 'object' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
     async execute(arguments_, execution) {
+      if (arguments_.action === 'plan' && state.context.planning &&
+          !(typeof arguments_.overview === 'string' && arguments_.overview.trim())) {
+        throw new HarnessError('请填写规划 overview，说明目标、验收标准、分工及交付物。', 'TASK_NO_EFFECT')
+      }
       let response
       try {
         response = await state.call({ operation: 'task', arguments: arguments_, context: state.context }, execution.signal)

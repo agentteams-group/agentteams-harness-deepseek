@@ -133,7 +133,8 @@ async function run(ctx, config, io) {
     const { agent } = await trace.run(() => openAgent(ctx, sessionId, config.resume, selection, publicTask))
     bindNativeTaskHistory(publicTask, agent.session)
     if (frame?.meta.teamharness_coordination?.kind !== 'assistant_digest') {
-      interactions?.bindProgress(agent.session, progressRunId(identity, process.env.TEAMHARNESS_MATRIX_ROOM_ID, config.eventId))
+      interactions?.bindProgress(agent.session, progressRunId(identity, process.env.TEAMHARNESS_MATRIX_ROOM_ID, config.eventId),
+        Boolean(identity?.task_id || frame?.meta.teamharness_coordination))
     }
     await agent.whenIdle()
     // Reconcile explicitly selected platform permissions on resumed sessions too.
