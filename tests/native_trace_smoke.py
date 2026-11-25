@@ -113,6 +113,7 @@ with tempfile.TemporaryDirectory() as temporary:
             assert span.parent_span_id == roots[0].span_id
         assert any(fields(span).get('agentteams.input.event_ids') == ['$native-trace-source'] for span in models)
         assert fields(roots[0])['agentteams.room.id'] == '!native-trace:test'
+        assert fields(roots[0])['agentteams.runtime'] == 'deepseek-harness'
         assert fields(roots[0])['agentteams.runtime.session_id'] == 'opaque-trace-fixture'
         assert all('SECRET_SYNTHETIC_TRACE_BODY' not in str(span) for span in spans)
         assert all(not any(key in fields(span) for key in ('input', 'output', 'gen_ai.prompt', 'gen_ai.completion')) for span in spans)
