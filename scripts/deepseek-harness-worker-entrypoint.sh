@@ -99,4 +99,7 @@ agentteams-dsh --dump-config >/dev/null
 log "DeepSeek Harness profile ready; starting Matrix channel loop"
 export PYTHONPATH="/opt/agentteams/scripts/lib${PYTHONPATH:+:${PYTHONPATH}}"
 python3 /opt/agentteams/scripts/lib/agentteams_receipts.py serve --runtime deepseek --workspace "${WORKER_HOME}" &
+if [ -n "${AGENTTEAMS_STORAGE_PREFIX:-}" ]; then
+    python3 /opt/agentteams/scripts/lib/harness_health.py --runtime deepseek-harness --member "${AGENTTEAMS_WORKER_NAME}" --parent "$$" &
+fi
 exec python3 /opt/agentteams/scripts/matrix_bridge.py
