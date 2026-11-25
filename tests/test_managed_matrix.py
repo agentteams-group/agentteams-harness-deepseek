@@ -87,6 +87,16 @@ class ManagedMatrixTest(unittest.TestCase):
         self.assertEqual(timeline, [("save", self.identity, "answer"), ("send",)])
         self.sessions.remember.assert_not_called()
 
+    def test_verified_task_controls_do_not_replay_room_or_raw_envelope(self):
+        self.native.update(body="核对最终交付", kind="text",
+            _task_protocol_meta={"teamharness_coordination": {"kind": "main_task_ready"}})
+        native = self.enterContext(patch.object(bridge, "run_dsh", return_value="NO_REPLY"))
+        history = self.enterContext(patch("worker_matrix_raw.raw_room_history", return_value=["another agent"]))
+        self.enterContext(patch.object(bridge, "sync_sessions"))
+        self.recover()
+        self.assertEqual(native.call_args.args[0], "核对最终交付")
+        history.assert_not_called()
+
     def test_room_encrypted_after_upload_blocks_native_file_event(self):
         from matrix_channel import MatrixClient
         native = MatrixClient("http://unused", "unused")

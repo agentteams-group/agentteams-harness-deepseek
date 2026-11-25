@@ -764,11 +764,18 @@ def recover_message(client, matrix, sessions, source, own, agents, worker, works
     cached = (view.get("cache") or {}).get("native_ref", "")
     reuse = bool(cached and sessions.usable(view, cached, native_session_digest(cached)))
     ref = cached if reuse else "session-message-" + uuid.uuid4().hex
-    task = claim["resume_text"]
+    control = source.get("_task_protocol_meta", {}).get("teamharness_coordination", {})
+    task_control = control.get("kind") in {"handoff", "task_submitted", "main_task_ready"}
+    task = source["body"] if task_control else claim["resume_text"]
+    checkpoint = claim["execution"].get("checkpoint")
+    if task_control and checkpoint:
+        task += "\nResume from the saved execution checkpoint without repeating completed operations:\n" + json.dumps(checkpoint, ensure_ascii=False)
     if source["kind"] != "text":
         prompt, _ = materialize_attachment(source, client, workspace, int(os.getenv("AGENTTEAMS_MATRIX_ATTACHMENT_MAX_BYTES", 25 * 1024 * 1024)))
         task += "\n" + prompt
     def new_prompt():
+        if task_control:
+            return task
         history = raw_room_history(client, matrix, own, source["room_id"], source["event_id"], admit)
         return task + ("\nEarlier Matrix messages:\n" + json.dumps(history, ensure_ascii=False) if history else "")
     def stopped(steer):
