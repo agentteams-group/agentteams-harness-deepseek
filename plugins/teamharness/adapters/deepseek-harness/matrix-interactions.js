@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { MatrixProgress } from './matrix-progress.js'
 
 const KEY = 'org.agentteams.approval'
 
@@ -14,7 +15,10 @@ export class MatrixInteractions {
       headers: { Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/json' },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal,
     })
-    if (!response.ok) throw new Error(`Matrix interaction HTTP ${response.status}`)
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}))
+      throw Object.assign(new Error(`Matrix interaction HTTP ${response.status}`), { status: response.status, code: body.errcode })
+    }
     return response.json()
   }
 
@@ -120,11 +124,16 @@ export class MatrixInteractions {
     }
   }
 
+  bindProgress(session, runId) {
+    this.progress = new MatrixProgress(this, session, runId)
+  }
+
   approvals = new Map()
   expiredApprovals = new Set()
   deliveries = new Set()
 
   async flush() {
+    await this.progress?.queue
     await Promise.all(this.deliveries)
   }
 }
@@ -142,6 +151,7 @@ export function installMatrixInteractions(ctx, options) {
     return asked.length === 1 ? transport.approval(req, asked[0].data.id) : next()
   })
   ctx.on('session/event', (_session, event) => {
+    transport.progress?.observe(_session, event)
     if (event.type === 'approval/decided') {
       const delivery = transport.decided(event.data.id, event.data.outcome)
       transport.deliveries.add(delivery)

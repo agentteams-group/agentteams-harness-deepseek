@@ -26,6 +26,8 @@ class Endpoint(BaseHTTPRequestHandler):
             return
         assert self.path == '/chat/completions', self.path
         request = json.loads(data)
+        if type(self).task_phase:
+            assert 'SECRET_RAW_TRANSPORT_SNAPSHOT_MUST_STAY_NATIVE' not in json.dumps(request.get('messages', []))
         if type(self).fail_model:
             self.send_response(401)
             self.send_header('Content-Type', 'application/json')
@@ -113,6 +115,7 @@ with tempfile.TemporaryDirectory() as temporary:
             assert span.parent_span_id == roots[0].span_id
         assert any(fields(span).get('agentteams.input.event_ids') == ['$native-trace-source'] for span in models)
         assert fields(roots[0])['agentteams.room.id'] == '!native-trace:test'
+        assert fields(roots[0])['agentteams.runtime'] == 'deepseek-harness'
         assert fields(roots[0])['agentteams.runtime.session_id'] == 'opaque-trace-fixture'
         assert all('SECRET_SYNTHETIC_TRACE_BODY' not in str(span) for span in spans)
         assert all(not any(key in fields(span) for key in ('input', 'output', 'gen_ai.prompt', 'gen_ai.completion')) for span in spans)
@@ -138,11 +141,30 @@ with tempfile.TemporaryDirectory() as temporary:
             'sender_id': '@controller:test', 'event_id': '$native-task-source', 'teamharness_coordination': {
                 'kind': 'task_assigned', 'id': 'b' * 32, 'task_id': 'own', 'main_task_id': 'main',
                 'project_id': '', 'delivery_id': 'dispatch'}}})
+        seed = """import { Context } from '@deepseek-ai/cordis';
+import { SessionStore } from '@deepseek-ai/dsh-session';
+import { JsonlSessionPersistence } from '@deepseek-ai/dsh-session-persistence-jsonl';
+import { freezeMessage, MessageId } from '@deepseek-ai/dsh-llm';
+import { matrixEventMessageId } from '/opt/agentteams/dsh-template/profiles/headless/node_modules/agentteams-teamharness-dsh/message-id.js';
+const ctx=new Context();
+await ctx.plugin(SessionStore).await();
+await ctx.plugin(JsonlSessionPersistence,{root:process.argv[1]+'/sessions',compression:'zstd'}).await();
+const sessions=ctx.get('sessions');
+const session=sessions.create('opaque-task-fixture',{meta:{cwd:process.argv[2]}});
+session.append('user/message',freezeMessage({id:MessageId(matrixEventMessageId('agentteams-source-v1:$native-task-source',1)),
+role:'user',source:{kind:'plugin',plugin:'agentteams.matrix-source'},
+content:[{type:'text',text:'SECRET_RAW_TRANSPORT_SNAPSHOT_MUST_STAY_NATIVE'}]}),{surfaceOp:'append'});
+await sessions.flush(session);
+await ctx.registry.delete(JsonlSessionPersistence);await ctx.registry.delete(SessionStore);
+"""
+        seeded = subprocess.run(['node', '--input-type=module', '-e', seed, str(home), str(output)],
+                                cwd='/opt/agentteams/dsh', env=env, capture_output=True, text=True)
+        assert seeded.returncode == 0, seeded.stderr
         Endpoint.task_phase = True
         phase = subprocess.run(['agentteams-dsh', 'Execute this synthetic Task and submit.'], cwd=workspace,
             env=env, capture_output=True, text=True, timeout=60)
         assert phase.returncode == 0, phase.stderr
-        assert 'Delivery and acceptance are not yet confirmed' in phase.stdout, phase.stdout
+        assert phase.stdout.strip() == 'NO_REPLY', phase.stdout
         assert Endpoint.phase_calls == 1, Endpoint.phase_calls
         task_root = next(span for span in spans if span.name == 'worker.turn')
         assert fields(task_root)['agentteams.coordination.id'] == 'b' * 32
@@ -162,6 +184,8 @@ process.stdout.write(JSON.stringify(lines));"""
         assert any(record.get('type') == 'turn/end' and record['data']['reason']['kind'] == 'completed' for record in records), records
         assert any(record.get('type') == 'user/message' and record['data'].get('source', {}).get('plugin') == 'agentteams.task-phase' for record in records), records
         assert any(record.get('type') == 'tool/result' for record in records), records
+        assert any(record.get('type') == 'user/message' and
+                   'SECRET_RAW_TRANSPORT_SNAPSHOT_MUST_STAY_NATIVE' in str(record.get('data')) for record in records)
         print('Actual Task phase: one model call, normal native completion, durable tool/receipt and code final: PASS')
         spans.clear()
         Endpoint.fail_model = True

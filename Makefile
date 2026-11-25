@@ -24,6 +24,7 @@ push:
 smoke:
 	docker run --rm --entrypoint python3 -v "$(CURDIR)/tests/headless_smoke.py:/tmp/headless_smoke.py:ro" $(IMAGE):$(VERSION) /tmp/headless_smoke.py
 	docker run --rm --entrypoint node -e AGENTTEAMS_INTERACTIONS_MODULE=/opt/agentteams/plugins/teamharness/adapters/deepseek-harness/matrix-interactions.js -v "$(CURDIR)/tests/native/matrix-interactions.mjs:/opt/agentteams/dsh/test-matrix-interactions.mjs:ro" $(IMAGE):$(VERSION) --test /opt/agentteams/dsh/test-matrix-interactions.mjs
+	docker run --rm --entrypoint node -e AGENTTEAMS_INTERACTIONS_MODULE=/opt/agentteams/plugins/teamharness/adapters/deepseek-harness/matrix-interactions.js -v "$(CURDIR)/tests/native/matrix-progress.mjs:/opt/agentteams/dsh/test-matrix-progress.mjs:ro" $(IMAGE):$(VERSION) --test /opt/agentteams/dsh/test-matrix-progress.mjs
 	docker run --rm --entrypoint node -v "$(CURDIR)/tests/native/recovery-mcp.mjs:/opt/agentteams/dsh/test-recovery-mcp.mjs:ro" $(IMAGE):$(VERSION) --test /opt/agentteams/dsh/test-recovery-mcp.mjs
 	# Direct module import needs the runtime peer dependencies normally provided by the DSH loader.
 	docker run --rm --entrypoint /bin/sh -e AGENTTEAMS_MANAGED_NATIVE_MODULE=/opt/agentteams/dsh-template/profiles/headless/node_modules/agentteams-teamharness-dsh/managed-native.js -v "$(CURDIR)/tests/native/managed-input.mjs:/opt/agentteams/dsh/test-managed-input.mjs:ro" $(IMAGE):$(VERSION) -ec 'ln -s /opt/agentteams/dsh/node_modules /opt/agentteams/dsh-template/node_modules; exec node --test /opt/agentteams/dsh/test-managed-input.mjs'

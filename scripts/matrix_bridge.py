@@ -410,7 +410,8 @@ def run_dsh(
     )
     if room_id and sender:
         native_event = event_id if event_id.startswith("$") else (source_event_ids or [event_id])[0]
-        native_meta = {**(protocol_meta or {}), "room_id": room_id, "sender_id": sender, "event_id": native_event}
+        native_meta = {**(protocol_meta or {}), "room_id": room_id, "sender_id": sender, "event_id": native_event,
+                       "agent_matrix_user_id": environment.get("AGENTTEAMS_MATRIX_USER_ID", "")}
         if len(source_event_ids or []) > 1 and not native_meta.get("teamharness_coordination"):
             native_meta["matrix_input_sources"] = [
                 {"room_id": room_id, "sender_id": sender, "event_id": source} for source in source_event_ids]
@@ -533,6 +534,14 @@ def native_session_digest(session_id):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def progress_run_id(identity=None, room="", event_id=""):
+    if identity and identity.get("task_id"):
+        return f"deepseek:task:{identity['team_id']}:{identity['task_id']}:{identity['generation']}"
+    if identity and identity.get("event_key"):
+        return f"deepseek:message:{identity['event_key']}:{identity['generation']}"
+    return f"deepseek:message:{room}:{event_id}"
+
+
 def publish_task_reply(client, recovery, task, team, own_user_id, text):
     from worker_matrix_delivery import confirm_bound
     from worker_matrix_raw import publish_raw_saved
@@ -543,7 +552,7 @@ def publish_task_reply(client, recovery, task, team, own_user_id, text):
         saved = recovery.checkpoint(task_id, team, checkpoint)["execution"]
         confirm_bound(saved, identity, "deepseek-harness", checkpoint)
     event_id = publish_raw_saved(client, task["room_id"], text, identity["checkpoint"], own_user_id, bind,
-        content={"org.agentteams.progress_only": True}, legacy_transaction_id=matrix_transaction_id)
+        content={"org.agentteams.progress_only": True, "org.agentteams.run_id": progress_run_id({**identity, "task_id": task_id, "team_id": team})}, legacy_transaction_id=matrix_transaction_id)
     return recovery.delivered(task_id, team, event_id)
 
 
@@ -597,7 +606,7 @@ def recover_tasks(client, state, worker_name, workspace, timeout_seconds, own_us
             if task is None:
                 continue
         admission = (team, task_id, task["execution"]["generation"])
-        if task["status"] == "submitted":
+        if task["status"] in {"submitted", "completed"}:
             continue
         key = team + "/" + task_id
         work = {"kind": "task", "team_id": team, "task_id": task_id}
@@ -658,7 +667,8 @@ def recover_tasks(client, state, worker_name, workspace, timeout_seconds, own_us
         if cp.get("delivery") != "delivered":
             saved = publish_task_reply(client, recovery, {**task, "execution": saved["execution"]}, team, own_user_id, answer)
         digest = native_session_digest(session_id)
-        if digest and task["status"] != "submitted":
+        current = saved.get("task") or recovery.current(task_id, team)
+        if digest and current and current["status"] == "in_progress":
             view = sessions.load(work)
             if view["checkpoint_digest"] == recovery.digest(saved["execution"]["checkpoint"]):
                 sessions.remember(work, view, task["execution"], session_id, digest, int(time.time()) + 86400)
@@ -724,6 +734,7 @@ def deliver_managed_message(client, matrix, claim, source, own, agents):
     def bind(checkpoint):
         saved = matrix.message_checkpoint(identity, checkpoint)
         confirm_bound(saved["execution"], identity, "deepseek-harness", checkpoint)
+    content["org.agentteams.run_id"] = progress_run_id(identity)
     event = publish_raw_saved(client, source["room_id"], text, claim["execution"]["checkpoint"],
                               own, bind, content=content, legacy_transaction_id=matrix_transaction_id)
     return matrix.message_delivered(identity, event)
@@ -1240,6 +1251,7 @@ def main() -> int:
                         f"{event['event_id']}:reply",
                         reply_mentions,
                         bool(source_agent),
+                        run_id=progress_run_id(room=event["room_id"], event_id=event["event_id"]),
                         **({"progress_only": True} if event.get("coordination_session") else {}),
                     )
                     trace_event("message.sent", room_id=event["room_id"], event_id=event["event_id"], reply_event_id=reply_event_id)
@@ -1292,6 +1304,7 @@ def main() -> int:
                         f"{event['event_id']}:failure",
                         reply_mention_user_ids(event, failure, agent_user_ids, own_user_id),
                         bool(source_agent),
+                        run_id=progress_run_id(room=event["room_id"], event_id=event["event_id"]),
                         **({"progress_only": True} if event.get("coordination_session") else {}),
                     )
                     state.mark_completed(event["event_id"], failure_event_id)

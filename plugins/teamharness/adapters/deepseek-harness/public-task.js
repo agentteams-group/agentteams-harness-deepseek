@@ -43,9 +43,11 @@ export function nativeCall(payload, signal) {
 
 export async function preparePublicTask(frame, call = nativeCall) {
   if (!frame) return undefined
-  const context = { role: frame.role, sourceEvent: frame.meta.event_id,
-    sources: frame.meta.event_id?.startsWith('$') ? await call({ operation: 'sources', meta: frame.meta }) : [] }
   const event = frame.meta.teamharness_coordination
+  const context = { role: frame.role, sourceEvent: frame.meta.event_id,
+    actor: frame.meta.agent_matrix_user_id || '',
+    sources: !event && frame.meta.event_id?.startsWith('$')
+      ? await call({ operation: 'sources', meta: frame.meta }) : [] }
   let phase
   if (event) {
     const current = { ...event }
@@ -133,6 +135,16 @@ export async function persistRefreshedInputs(state, agent, sessions, persistence
   delete state.context.inputRefreshPending
 }
 
+export function bindNativeTaskHistory(state, session) {
+  if (!state) return
+  const derive = session.deriveMessages.bind(session)
+  session.deriveMessages = () => {
+    const evidence = new Set([state.context.sourceEvent, ...(state.context.sources || []).map(source => source.eventId)]
+      .filter(Boolean).map(event => matrixEventMessageId('agentteams-source-v1:' + event, 1)))
+    return derive().filter(message => message.source?.plugin !== 'agentteams.matrix-source' && !evidence.has(message.id))
+  }
+}
+
 export async function installPublicTask(agentCtx, state) {
   if (!state || state.inactive) return
   const tools = agentCtx.get('tools')
@@ -142,9 +154,11 @@ export async function installPublicTask(agentCtx, state) {
   if (denied.length) tools.restrict({ deny: denied })
   const skill = readFileSync(join(process.env.AGENTTEAMS_PLUGIN_DIR, 'skills/team/task-management/SKILL.md'), 'utf8')
   const receipts = new Map()
+  const modelContext = state.context.context
+    ? await state.call({ operation: 'model_context', context: state.context.context }) : undefined
   agentCtx.get('systemPrompt').section({ name: 'teamharness:public-task', order: 21,
     text: () => [`Use ${TASK} for the common Task operations described below.`, skill, state.context.fact,
-      state.context.context ? JSON.stringify(state.context.context) : '',
+      modelContext ? JSON.stringify(modelContext) : '',
       state.context.roster ? '[Registered public team identities]\n' + JSON.stringify(state.context.roster) : '',
       '[Task input references]\n' + JSON.stringify(state.context.sources), ...receipts.values()].filter(Boolean).join('\n\n') })
   const definition = { name: TASK, description: schema.description, parameters: schema.inputSchema,
@@ -164,13 +178,15 @@ export async function installPublicTask(agentCtx, state) {
       if (response.fact) {
         receipts.set(response.receiptId || JSON.stringify(response.refreshedInputs.map(input => input.eventId)), response.fact)
       }
+      for (const receipt of response.extraReceipts || []) receipts.set(receipt.receiptId, receipt.fact)
       if (response.phaseComplete === true) {
-        state.finalReceipt = response.fact
+        state.finalReceipt = [...receipts.values()].join('\n\n')
         state.phaseReceiptId = response.receiptId
+        state.displayText = response.displayText ?? 'NO_REPLY'
         execution.concludeTurn()
       }
       if (response.refreshedInputs?.length) return { ok: true, outcome: 'input_changed', noTaskRegistered: true, taskSystemContext: response.fact }
-      return response.result
+      return state.call({ operation: 'model_result', outcome: response }, execution.signal)
     },
   }
   state.nativeExecute = definition.execute

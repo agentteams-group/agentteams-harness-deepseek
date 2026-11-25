@@ -19,7 +19,9 @@ export class NativeTrace {
   async start() {
     if (!this.enabled) return
     this.child = spawn(process.env.AGENTTEAMS_TELEMETRY_PYTHON || '/opt/venv/agentteams/bin/python3',
-      [fileURLToPath(new URL('./native-trace.py', import.meta.url))], { stdio: ['pipe', 'pipe', 'pipe'] })
+      [fileURLToPath(new URL('./native-trace.py', import.meta.url))], {
+        stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, AGENTTEAMS_OTEL_RUNTIME: 'deepseek-harness' },
+      })
     this.child.stderr.resume()
     createInterface({ input: this.child.stdout }).on('line', line => {
       try {

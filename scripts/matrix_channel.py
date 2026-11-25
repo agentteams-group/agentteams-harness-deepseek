@@ -312,8 +312,11 @@ class MatrixClient:
         mentioned_user_ids: list[str] | None = None,
         auto_source_mention: bool = False,
         progress_only: bool = False,
+        run_id: str | None = None,
     ) -> str:
         content: dict[str, Any] = {"msgtype": "m.text", "body": text}
+        if run_id:
+            content["org.agentteams.run_id"] = run_id
         if progress_only:
             content["org.agentteams.progress_only"] = True
             mentioned_user_ids = []
