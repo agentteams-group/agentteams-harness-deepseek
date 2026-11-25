@@ -9,3 +9,5 @@ Project model context through the common `model_context` operation and terminal 
 Do not publish another runtime-session cache after terminal delivery. Retain immutable results and native history; do not reopen completed execution.
 
 Native SDK fixtures cover tool restriction, compact context, terminal silence, physical receipt persistence and one provider request for submission. Real Matrix collaboration, remote history, exact returned artifacts and Tracing/UI evidence must be verified separately. Record failed attempts and interventions instead of counting them as clean acceptance.
+
+Raw Matrix transport proof remains in physical native history for the input ledger. The native session message projection excludes only owned transport-evidence message identities and their explicit plugin source, while keeping the admitted user request and compact Task context. The headless SDK fixture seeds durable transport evidence, verifies it remains physically stored, and rejects any provider request that repeats that envelope.

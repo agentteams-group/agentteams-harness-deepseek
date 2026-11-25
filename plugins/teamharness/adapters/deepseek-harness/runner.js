@@ -13,7 +13,7 @@ import { checkpointInput } from './session-receipt.js'
 import { installMatrixInteractions } from './matrix-interactions.js'
 import { runtimeRecord } from './runtime-logging.js'
 import { checkExecution, commitMatrixSource, installExecutionGuard, recoveryCall } from './managed-native.js'
-import { installPublicTask, preparePublicTask } from './public-task.js'
+import { bindNativeTaskHistory, installPublicTask, preparePublicTask } from './public-task.js'
 import { NativeTrace } from './native-trace.js'
 
 
@@ -32,12 +32,12 @@ function messageId(eventId, attempt) {
   if (!eventId) return MessageId(randomUUID())
   return MessageId(matrixEventMessageId(eventId, attempt))
 }
-function userMessage(task, id) {
+function userMessage(task, id, source = { kind: 'user' }) {
   return freezeMessage({
     id,
     role: 'user',
     content: [{ type: 'text', text: task }],
-    source: { kind: 'user' },
+    source,
   })
 }
 
@@ -130,6 +130,7 @@ async function run(ctx, config, io) {
       return
     }
     const { agent } = await trace.run(() => openAgent(ctx, sessionId, config.resume, selection, publicTask))
+    bindNativeTaskHistory(publicTask, agent.session)
     await agent.whenIdle()
     // Reconcile explicitly selected platform permissions on resumed sessions too.
     if (process.env.DSH_PERMISSION_MODE) {
@@ -146,7 +147,8 @@ async function run(ctx, config, io) {
       const body = source.input
       if (source.room_id !== process.env.TEAMHARNESS_MATRIX_ROOM_ID || source.event_id !== process.env.TEAMHARNESS_SOURCE_EVENT_ID ||
           body.sender !== process.env.TEAMHARNESS_MATRIX_SENDER) throw new Error('Unmatched Matrix source')
-      const native = userMessage(JSON.stringify({ room_id: source.room_id, event_id: source.event_id, ...body }), messageId('agentteams-source-v1:' + source.event_id, 1))
+      const native = userMessage(JSON.stringify({ room_id: source.room_id, event_id: source.event_id, ...body }), messageId('agentteams-source-v1:' + source.event_id, 1),
+        { kind: 'plugin', plugin: 'agentteams.matrix-source' })
       const existing = agent.session.events.find(event => event.type === 'user/message' && event.data.id === native.id)
       if (existing && JSON.stringify(existing.data.content) !== JSON.stringify(native.content)) throw new Error('Different native Matrix source')
       if (!existing) agent.session.append('user/message', native, { surfaceOp: 'append' })
@@ -201,7 +203,8 @@ async function run(ctx, config, io) {
         if (source.room_id !== process.env.TEAMHARNESS_MATRIX_ROOM_ID ||
             source.input.sender !== process.env.TEAMHARNESS_MATRIX_SENDER ||
             source.event_id !== request.event_id) throw new Error('Steering source changed')
-        const native = userMessage(JSON.stringify(source), messageId('agentteams-source-v1:' + request.event_id, 1))
+        const native = userMessage(JSON.stringify(source), messageId('agentteams-source-v1:' + request.event_id, 1),
+          { kind: 'plugin', plugin: 'agentteams.matrix-source' })
         if (!agent.session.events.some(event => event.type === 'user/message' && event.data.id === native.id)) {
           agent.session.append('user/message', native, { surfaceOp: 'append' })
         }

@@ -135,6 +135,16 @@ export async function persistRefreshedInputs(state, agent, sessions, persistence
   delete state.context.inputRefreshPending
 }
 
+export function bindNativeTaskHistory(state, session) {
+  if (!state) return
+  const derive = session.deriveMessages.bind(session)
+  session.deriveMessages = () => {
+    const evidence = new Set([state.context.sourceEvent, ...(state.context.sources || []).map(source => source.eventId)]
+      .filter(Boolean).map(event => matrixEventMessageId('agentteams-source-v1:' + event, 1)))
+    return derive().filter(message => message.source?.plugin !== 'agentteams.matrix-source' && !evidence.has(message.id))
+  }
+}
+
 export async function installPublicTask(agentCtx, state) {
   if (!state || state.inactive) return
   const tools = agentCtx.get('tools')
