@@ -142,7 +142,7 @@ with tempfile.TemporaryDirectory() as temporary:
         phase = subprocess.run(['agentteams-dsh', 'Execute this synthetic Task and submit.'], cwd=workspace,
             env=env, capture_output=True, text=True, timeout=60)
         assert phase.returncode == 0, phase.stderr
-        assert 'Delivery and acceptance are not yet confirmed' in phase.stdout, phase.stdout
+        assert phase.stdout.strip() == 'NO_REPLY', phase.stdout
         assert Endpoint.phase_calls == 1, Endpoint.phase_calls
         task_root = next(span for span in spans if span.name == 'worker.turn')
         assert fields(task_root)['agentteams.coordination.id'] == 'b' * 32

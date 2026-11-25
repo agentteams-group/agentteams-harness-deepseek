@@ -10,7 +10,7 @@ import { SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { SessionStore } from '@deepseek-ai/dsh-session'
 import { JsonlSessionPersistence } from '@deepseek-ai/dsh-session-persistence-jsonl'
 
-const { nativeCall, preparePublicTask, installPublicTask, persistRefreshedInputs, persistDeliveryContext } = await import(
+const { nativeCall, preparePublicTask, installPublicTask, persistRefreshedInputs, persistDeliveryContext, persistPhaseReceipt } = await import(
   process.env.AGENTTEAMS_PUBLIC_TASK_MODULE ?? new URL('../../plugins/teamharness/adapters/deepseek-harness/public-task.js', import.meta.url).href)
 
 test('assistant control input does not bind a business Task roster or tools', async () => {
@@ -24,8 +24,63 @@ test('assistant control input does not bind a business Task roster or tools', as
     assert.fail('Assistant input must not load Task roster or schema: ' + request.operation)
   })
   assert.equal(state, undefined)
-  assert.deepEqual(calls, ['sources', 'prepare_event'])
+  assert.deepEqual(calls, ['prepare_event'])
   await installPublicTask({ get() { assert.fail('Assistant input must not install Task tools') } }, state)
+})
+
+test('verified execution keeps its authenticated actor without binding another Human source', async () => {
+  const state = await preparePublicTask({ role: 'worker', meta: { event_id: '$assignment',
+    agent_matrix_user_id: '@own:test', teamharness_coordination: { kind: 'task_assigned', task_id: 'own' } } },
+  async request => {
+    assert.equal(request.operation, 'prepare_event')
+    return { execution: 'own' }
+  })
+  assert.equal(state.context.actor, '@own:test')
+  assert.deepEqual(state.context.sources, [])
+})
+
+test('native terminal tool and stored receipt retain sent facts with silent presentation', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-terminal-facts-'))
+  const ctx = new Context()
+  let scoped
+  try {
+    await ctx.plugin(SystemPrompt).await()
+    await ctx.plugin(ToolRuntime, { mode: 'native' }).await()
+    await ctx.plugin(SessionStore).await()
+    await ctx.plugin(JsonlSessionPersistence, { root: join(root, 'native'), compression: 'none' }).await()
+    const sessions = ctx.get('sessions'), persistence = ctx.get('sessionPersistence')
+    const session = sessions.create('session-terminal', { meta: { cwd: root } })
+    const agent = { session }
+    scoped = createScope(ctx, agent)
+    const outcome = { phaseComplete: true, receiptId: 'saved', fact: 'Saved immutable result.',
+      result: { task: { id: 'own', status: 'completed', spec: 'Do not repeat this full snapshot' } },
+      extraReceipts: [{ receiptId: 'sent', fact: 'Already notified downstream. Matrix event $sent.' }] }
+    const state = { context: { role: 'worker', execution: 'own', sources: [],
+      context: { task: { id: 'own', spec: 'Own duty' }, inputs: [{ files: [{ name: 'input.json', preview: 'Never inject preview' }] }] } },
+      pending: [], call: request => request.operation === 'task' ? outcome : nativeCall(request) }
+    await installPublicTask(scoped.ctx, state)
+    const result = await scoped.ctx.get('tools').execute({ agent, callId: 'submit', name: 'mcp__teamharness__task',
+      arguments: { action: 'submit', taskId: 'own', summary: 'Done' }, signal: new AbortController().signal })
+    assert.equal(result.isError, false)
+    assert.equal(result.concludesTurn, true)
+    assert.equal(state.displayText, 'NO_REPLY')
+    const text = result.content.find(block => block.type === 'text').text
+    assert.match(text, /Already notified downstream/)
+    assert.doesNotMatch(text, /Do not repeat this full snapshot/)
+    const prompt = await scoped.ctx.get('systemPrompt').assemble({ scope: agent })
+    assert.doesNotMatch(prompt.sections.map(section => section.text).join('\n'), /Never inject preview/)
+    await persistPhaseReceipt(state, agent, sessions, persistence)
+    const stored = await persistence.loadStored(session.id)
+    assert.ok(stored.events.some(event => event.type === 'user/message' &&
+      JSON.stringify(event.data).includes('Matrix event $sent')))
+  } finally {
+    await scoped?.dispose()
+    await ctx.registry.delete(ToolRuntime)
+    await ctx.registry.delete(SystemPrompt)
+    await ctx.registry.delete(JsonlSessionPersistence)
+    await ctx.registry.delete(SessionStore)
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('real DSH scope shadows old MCP Task, restricts legacy tools and preserves the common receipt', async () => {
@@ -124,7 +179,7 @@ test('canonical phase admission is required before planning and inactive phases 
     assert.fail('inactive phase started preparation')
   }
   assert.equal((await preparePublicTask(frame, call)).inactive, true)
-  assert.deepEqual(calls.map(call => call.operation), ['sources', 'admit_event'])
+  assert.deepEqual(calls.map(call => call.operation), ['admit_event'])
 })
 
 

@@ -227,7 +227,7 @@ async function run(ctx, config, io) {
 
     await receiptCheckpoint.catch(() => {})
     await interactions?.flush()
-    io.stdout.write((publicTask?.finalReceipt ?? outcome?.text ?? '') + '\n')
+    io.stdout.write((publicTask?.displayText ?? outcome?.text ?? '') + '\n')
     if (outcome?.reason?.kind === 'error') {
       io.stderr.write(`dsh: ${outcome.reason.error.code}: ${outcome.reason.error.message}\n`)
     }
