@@ -24,6 +24,7 @@ RUN node -e 'const requiredMajor=24; const [a,b,c]=process.versions.node.split("
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
+        git \
         jq \
         python3 \
         python3-venv \

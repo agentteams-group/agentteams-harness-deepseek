@@ -22,6 +22,7 @@ push:
 	docker buildx build --pull --push --platform $(PLATFORMS) $(BUILD_ARGS) -t $(IMAGE):$(VERSION) .
 
 smoke:
+	docker run --rm --network none --entrypoint python3 -v "$(CURDIR)/tests/git_bundle_smoke.py:/tmp/git_bundle_smoke.py:ro" $(IMAGE):$(VERSION) /tmp/git_bundle_smoke.py
 	docker run --rm --entrypoint python3 -v "$(CURDIR)/tests/headless_smoke.py:/tmp/headless_smoke.py:ro" $(IMAGE):$(VERSION) /tmp/headless_smoke.py
 	docker run --rm --entrypoint node -e AGENTTEAMS_INTERACTIONS_MODULE=/opt/agentteams/plugins/teamharness/adapters/deepseek-harness/matrix-interactions.js -v "$(CURDIR)/tests/native/matrix-interactions.mjs:/opt/agentteams/dsh/test-matrix-interactions.mjs:ro" $(IMAGE):$(VERSION) --test /opt/agentteams/dsh/test-matrix-interactions.mjs
 	docker run --rm --entrypoint node -e AGENTTEAMS_INTERACTIONS_MODULE=/opt/agentteams/plugins/teamharness/adapters/deepseek-harness/matrix-interactions.js -v "$(CURDIR)/tests/native/matrix-progress.mjs:/opt/agentteams/dsh/test-matrix-progress.mjs:ro" $(IMAGE):$(VERSION) --test /opt/agentteams/dsh/test-matrix-progress.mjs
