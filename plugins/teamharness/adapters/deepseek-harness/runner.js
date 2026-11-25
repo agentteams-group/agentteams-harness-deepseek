@@ -15,6 +15,7 @@ import { runtimeRecord } from './runtime-logging.js'
 import { checkExecution, commitMatrixSource, installExecutionGuard, recoveryCall } from './managed-native.js'
 import { bindNativeTaskHistory, installPublicTask, preparePublicTask } from './public-task.js'
 import { NativeTrace } from './native-trace.js'
+import { progressRunId } from './matrix-progress.js'
 
 
 export const name = 'agentteams-headless-runner'
@@ -131,6 +132,9 @@ async function run(ctx, config, io) {
     }
     const { agent } = await trace.run(() => openAgent(ctx, sessionId, config.resume, selection, publicTask))
     bindNativeTaskHistory(publicTask, agent.session)
+    if (frame?.meta.teamharness_coordination?.kind !== 'assistant_digest') {
+      interactions?.bindProgress(agent.session, progressRunId(identity, process.env.TEAMHARNESS_MATRIX_ROOM_ID, config.eventId))
+    }
     await agent.whenIdle()
     // Reconcile explicitly selected platform permissions on resumed sessions too.
     if (process.env.DSH_PERMISSION_MODE) {
@@ -237,6 +241,7 @@ async function run(ctx, config, io) {
     await trace.close(outcome?.reason?.kind === 'error' ? { code: outcome.reason.error.code } : undefined)
     io.exit(outcome?.reason?.kind === 'completed' ? 0 : 1)
   } catch (error) {
+    await interactions?.flush()
     await trace.close(error)
     throw error
   }

@@ -1,0 +1,81 @@
+export function progressRunId(identity, room, eventId) {
+  if (identity?.task_id) return `deepseek:task:${identity.team_id}:${identity.task_id}:${identity.generation}`
+  if (identity?.event_key) return `deepseek:message:${identity.event_key}:${identity.generation}`
+  return `deepseek:message:${room}:${eventId}`
+}
+
+/** Display native events through the shared run-block contract, never as agent input. */
+export class MatrixProgress {
+  constructor(transport, session, runId) {
+    Object.assign(this, { transport, session, runId })
+    this.calls = new Map()
+    this.queue = Promise.resolve()
+    this.secrets = [transport.token, ...Object.entries(process.env)
+      .filter(([key]) => /(?:TOKEN|PASSWORD|API_KEY|SECRET)$/.test(key)).map(([, value]) => value)]
+      .filter(value => typeof value === 'string' && value.length >= 8)
+  }
+
+  safe(value, key = '') {
+    if (/(?:^|_)(?:token|password|api_key|secret|authorization)$/i.test(key)) return '[REDACTED]'
+    if (Array.isArray(value)) return value.map(item => this.safe(item))
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, this.safe(item, name)]))
+    if (typeof value === 'string') {
+      for (const secret of this.secrets) value = value.split(secret).join('[REDACTED]')
+      return value.replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, 'Bearer [REDACTED]')
+    }
+    return value
+  }
+
+  bounded(value) {
+    const safe = this.safe(value), text = JSON.stringify(safe)
+    return text.length > 4096 ? { preview: text.slice(0, 4096), truncated: true } : safe
+  }
+
+  observe(session, event) {
+    if (session !== this.session) return
+    this.queue = this.queue.then(() => this.publish(event)).catch(error => {
+      console.error('Matrix native progress delivery failed:', error.message)
+    })
+  }
+
+  async send(block, previous) {
+    // DSH is a raw Matrix client: never leak progress if room encryption changes.
+    try {
+      await this.transport.api(`/rooms/${encodeURIComponent(this.transport.room)}/state/m.room.encryption/`)
+      throw new Error('Native progress requires an unencrypted Matrix room')
+    } catch (error) {
+      if (error.status !== 404 || error.code !== 'M_NOT_FOUND') throw error
+    }
+    const content = { msgtype: 'm.notice', body: block.type === 'thinking' ? block.content : `${block.tool_name} · ${block.status}`,
+      'org.agentteams.progress_only': true, 'm.mentions': { user_ids: [] },
+      'org.agentteams.run': { version: '1', run_id: this.runId, blocks: [block] } }
+    return this.transport.send(previous ? { ...content, 'm.new_content': content,
+      'm.relates_to': { rel_type: 'm.replace', event_id: previous } } : content)
+  }
+
+  async publish({ type, data }) {
+    if (type === 'turn/end') {
+      const kind = data.reason?.kind === 'completed' ? 'quiet' : data.reason?.kind === 'error' ? 'failed' : 'cancelled'
+      await this.send({ type: 'error', kind, title: { quiet: '已处理', failed: '执行失败', cancelled: '已停止' }[kind] })
+    } else if (type === 'assistant/message') {
+      const summary = (data.message?.content ?? []).filter(block => block.type === 'reasoning' && block.text)
+        .map(block => block.text).join('\n\n')
+      if (summary) await this.send({ type: 'thinking', content: this.safe(summary).slice(0, 4096) })
+    } else if (type === 'tool/call' && !this.calls.has(data.callId)) {
+      let args
+      try { args = JSON.parse(data.arguments) } catch { args = { raw: data.arguments } }
+      const block = { type: 'tool_call', tool_name: data.name, tool_call_id: data.callId,
+        arguments: this.bounded(args && typeof args === 'object' && !Array.isArray(args) ? args : { value: args }),
+        status: 'running', started_at: Date.now() }
+      const receipt = await this.send(block)
+      this.calls.set(data.callId, { block, eventId: receipt.event_id })
+    } else if (type === 'tool/result') {
+      for (const result of data.message?.content ?? []) {
+        const call = this.calls.get(result.toolCallId)
+        if (!call || result.type !== 'tool-result') continue
+        await this.send({ ...call.block, status: result.isError ? 'failed' : 'succeeded',
+          result: this.bounded(result.content), finished_at: Date.now() }, call.eventId)
+      }
+    }
+  }
+}
