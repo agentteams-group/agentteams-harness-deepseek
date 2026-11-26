@@ -6,8 +6,8 @@ export function progressRunId(identity, room, eventId) {
 
 /** Display native events through the shared run-block contract, never as agent input. */
 export class MatrixProgress {
-  constructor(transport, session, runId) {
-    Object.assign(this, { transport, session, runId })
+  constructor(transport, session, runId, taskPhase) {
+    Object.assign(this, { transport, session, runId, taskPhase })
     this.calls = new Map()
     this.queue = Promise.resolve()
     this.secrets = [transport.token, ...Object.entries(process.env)
@@ -62,6 +62,7 @@ export class MatrixProgress {
   async publish({ type, data }) {
     if (type === 'turn/end') {
       const kind = data.reason?.kind === 'completed' ? 'quiet' : data.reason?.kind === 'error' ? 'failed' : 'cancelled'
+      if (this.taskPhase && kind === 'quiet') return
       await this.send({ type: 'error', kind, title: { quiet: '已处理', failed: '执行失败', cancelled: '已停止' }[kind] })
     } else if (type === 'assistant/message') {
       const summary = (data.message?.content ?? []).filter(block => block.type === 'reasoning' && block.text)

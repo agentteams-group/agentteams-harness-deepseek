@@ -11,6 +11,7 @@ import signal
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import tempfile
 import time
@@ -355,6 +356,50 @@ def sync_sessions(worker_name: str) -> None:
     mc("mirror", f"{sessions}/", f"{prefix}/agents/{worker_name}/.dsh/sessions/", "--overwrite")
 
 
+def confirmed_task_handoffs(result, actor):
+    common = Path(os.getenv("AGENTTEAMS_PLUGIN_DIR", "/opt/agentteams/plugins/teamharness")) / "mcp/common"
+    if str(common) not in sys.path:
+        sys.path.insert(0, str(common))
+    import task_native
+    return task_native.dispatched_receipts(result, actor, task_native.controller_json)
+
+
+def flush_task_handoffs(worker, actor):
+    home = os.getenv("DSH_HOME")
+    if not home:
+        return
+    for path in (Path(home) / "sessions/.task-handoffs").glob("session-task-*.json"):
+        try:
+            pending = json.loads(path.read_text())
+            session = pending["sessionId"]
+            if not re.fullmatch(r"session-task-[0-9a-f]{32}", session) or session != path.stem:
+                raise ValueError("Unexpected submitting session")
+            result = pending["result"]
+            confirmed = confirmed_task_handoffs(result, actor)
+            if not confirmed:
+                continue
+            environment = {**os.environ, "TEAMHARNESS_DSH_SESSION_ID": session,
+                           "TEAMHARNESS_DSH_CONFIRMED_HANDOFF": json.dumps({"pending": pending, "confirmed": confirmed})}
+            subprocess.run(["agentteams-dsh", "记录已送达的任务交接"], env=environment, capture_output=True,
+                           check=True, timeout=30)
+            # Retain the pending facts until the updated native session has reached storage.
+            sync_sessions(worker)
+            sent = {json.loads(row["receiptId"])[1] for row in confirmed}
+            result["assignments"] = [row for row in result.get("assignments", []) if row["eventId"] not in sent]
+            if (result.get("notification") or {}).get("eventId") in sent:
+                result.pop("notification")
+            if result["assignments"] or result.get("notification"):
+                temporary = path.with_suffix(".tmp")
+                temporary.write_text(json.dumps(pending))
+                temporary.replace(path)
+            else:
+                prefix = required_env("AGENTTEAMS_STORAGE_PREFIX").rstrip("/")
+                mc("rm", f"{prefix}/agents/{worker}/.dsh/sessions/.task-handoffs/{path.name}")
+                path.unlink()
+        except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as error:
+            trace_event("task.handoff.deferred", session_id=path.stem, error=str(error)[:512])
+
+
 def dsh_error_detail(stderr: str, returncode: int) -> str:
     lines = [line.strip() for line in stderr.splitlines() if line.strip()]
     for line in lines:
@@ -402,6 +447,7 @@ def run_dsh(
             "TEAMHARNESS_DSH_SESSION_ID": session_id,
             "TEAMHARNESS_DSH_RESUME": "true" if resume else "false",
             "TEAMHARNESS_MATRIX_EVENT_ID": event_id,
+            "AGENTTEAMS_RUN_ID": progress_run_id(identity, room_id, event_id),
             "TEAMHARNESS_DSH_ATTEMPT": str(attempt),
             "TEAMHARNESS_MATRIX_ROOM_ID": room_id,
             "TEAMHARNESS_MATRIX_SENDER": sender,
@@ -551,8 +597,11 @@ def publish_task_reply(client, recovery, task, team, own_user_id, text):
     def bind(checkpoint):
         saved = recovery.checkpoint(task_id, team, checkpoint)["execution"]
         confirm_bound(saved, identity, "deepseek-harness", checkpoint)
+    run_id = progress_run_id({**identity, "task_id": task_id, "team_id": team})
     event_id = publish_raw_saved(client, task["room_id"], text, identity["checkpoint"], own_user_id, bind,
-        content={"org.agentteams.progress_only": True, "org.agentteams.run_id": progress_run_id({**identity, "task_id": task_id, "team_id": team})}, legacy_transaction_id=matrix_transaction_id)
+        content={"org.agentteams.progress_only": True, "org.agentteams.run_id": run_id,
+                 "org.agentteams.run": {"version": "1", "run_id": run_id, "blocks": [{"type": "text", "text": text}]}},
+        legacy_transaction_id=matrix_transaction_id)
     return recovery.delivered(task_id, team, event_id)
 
 
@@ -682,9 +731,11 @@ def managed_matrix_event(source, room_types, own, agents, transport):
     content, sender = raw.get("content") or {}, raw.get("sender")
     if not sender or raw.get("unsigned", {}).get("redacted_because"):
         return None
+    if raw.get("type") == "org.agentteams.coordination" and "org.agentteams.coordination" not in content:
+        return None
     if "org.agentteams.coordination" in content:
         try:
-            packet = notification(content, room, sender, own)
+            packet = notification(content, room, sender, own, event_id=source["event_id"])
         except IgnoredNotification:
             return None
         meta = packet["meta"]["teamharness_coordination"]
@@ -712,11 +763,34 @@ def managed_matrix_event(source, room_types, own, agents, transport):
     return "message", None, native
 
 
+def quiet_phase_receipt(source):
+    meta = source.get("_task_protocol_meta")
+    packet = meta.get("teamharness_coordination") if isinstance(meta, dict) else None
+    if not isinstance(packet, dict) or packet.get("kind") not in ("handoff", "task_submitted"):
+        return None
+    event = packet.get("id")
+    if not isinstance(event, str) or not re.fullmatch("[0-9a-f]{32}", event):
+        return None
+    return json.dumps({"phase": event, "matrixEventId": source["event_id"], "status": "settled"}, separators=(",", ":"))
+
+
+def phase_settled(source, matrix, identity):
+    event = source["_task_protocol_meta"]["teamharness_coordination"]["id"]
+    status = matrix.recovery.request("POST", "coordination/events/" + event + "/phase",
+        {"action": "begin", "native_event_id": source["event_id"], "process_id": identity["process_id"]})
+    return status.get("settled") is True
+
+
 def deliver_managed_message(client, matrix, claim, source, own, agents):
     from worker_matrix_delivery import confirm_bound
     from worker_matrix_raw import publish_raw_saved
 
     identity, text = claim["identity"], claim["saved_result"]
+    if text == quiet_phase_receipt(source):
+        if not phase_settled(source, matrix, identity):
+            from task_recovery import RecoveryConflict
+            raise RecoveryConflict("Saved quiet phase no longer matches the controller state")
+        return matrix.message_complete(identity)
     if source.get("coordination_session", "").startswith("coordination-assistant:"):
         return matrix.message_cancel(identity)
     content = {"m.relates_to": {"m.in_reply_to": {"event_id": source["event_id"]}}}
@@ -758,11 +832,18 @@ def recover_message(client, matrix, sessions, source, own, agents, worker, works
     cached = (view.get("cache") or {}).get("native_ref", "")
     reuse = bool(cached and sessions.usable(view, cached, native_session_digest(cached)))
     ref = cached if reuse else "session-message-" + uuid.uuid4().hex
-    task = claim["resume_text"]
+    control = source.get("_task_protocol_meta", {}).get("teamharness_coordination", {})
+    task_control = control.get("kind") in {"handoff", "task_submitted", "main_task_ready"}
+    task = source["body"] if task_control else claim["resume_text"]
+    checkpoint = claim["execution"].get("checkpoint")
+    if task_control and checkpoint:
+        task += "\nResume from the saved execution checkpoint without repeating completed operations:\n" + json.dumps(checkpoint, ensure_ascii=False)
     if source["kind"] != "text":
         prompt, _ = materialize_attachment(source, client, workspace, int(os.getenv("AGENTTEAMS_MATRIX_ATTACHMENT_MAX_BYTES", 25 * 1024 * 1024)))
         task += "\n" + prompt
     def new_prompt():
+        if task_control:
+            return task
         history = raw_room_history(client, matrix, own, source["room_id"], source["event_id"], admit)
         return task + ("\nEarlier Matrix messages:\n" + json.dumps(history, ensure_ascii=False) if history else "")
     def stopped(steer):
@@ -789,7 +870,15 @@ def recover_message(client, matrix, sessions, source, own, agents, worker, works
     matrix.message_current(identity)
     sync_sessions(worker)
     outputs = changed_outbox_files(workspace, before)
-    if source.get("coordination_session", "").startswith("coordination-assistant:") or not outputs and text.strip() == "NO_REPLY":
+    if not outputs and text.strip() == "NO_REPLY":
+        receipt = quiet_phase_receipt(source)
+        if receipt and phase_settled(source, matrix, identity):
+            matrix.message_save_reply(identity, receipt)
+            matrix.message_complete(identity)
+        else:
+            matrix.message_cancel(identity)
+        return
+    if source.get("coordination_session", "").startswith("coordination-assistant:"):
         matrix.message_cancel(identity)
         return
     if outputs:
@@ -975,6 +1064,7 @@ def run_managed_worker(client, worker, runtime_path, workspace, timeout, own, st
     admitted = set()
     rooms, agents, transport = {}, set(), {}
     joined = set()
+    reconciled_controls = set()
 
     def observe(payload):
         joined.clear()
@@ -986,20 +1076,42 @@ def run_managed_worker(client, worker, runtime_path, workspace, timeout, own, st
         native = managed_matrix_event(source, rooms, own, agents, transport)
         return native[:2] if native else None
 
-    receiver = RawWorkerSync(matrix, client, own, classify, observe)
+    receiver = RawWorkerSync(matrix, client, own, classify, observe, event_types=("m.room.message", "org.agentteams.coordination"))
     def pending_sources(snapshot):
         sources = []
         for row in matrix.pending(snapshot):
             room = row["room_id"]
             if room not in joined or snapshot["state"]["rooms"].get(room, {}).get("gaps"):
                 continue
+            if row["event_id"] in reconciled_controls:
+                continue
             receiver.require_room(room)
             parsed = managed_matrix_event(row, rooms, own, agents, transport)
             if parsed is None:
-                continue
+                # A submission can already be accepted after its silent result was staged.
+                # Resume delivery only for the exact stored result and Matrix notification.
+                cp = (row.get("execution") or {}).get("checkpoint") or {}
+                wire = row["input"].get("content", {}).get("org.agentteams.coordination") or {}
+                if row["intent"] != "message" or cp.get("delivery") != "pending" or not isinstance(wire, dict):
+                    continue
+                event = {"event_id": row["event_id"], "_task_protocol_meta": wire.get("channel_meta") or {}}
+                receipt = quiet_phase_receipt(event)
+                if not receipt or hashlib.sha256(receipt.encode()).hexdigest() != (cp.get("result") or {}).get("sha256"):
+                    continue
+                parsed = ("message", None, event)
             intent, task_id, event = parsed
             retained_coordination = (row["intent"] == "control" and intent == "message"
                 and "org.agentteams.coordination" in row["input"].get("content", {}))
+            if retained_coordination:
+                packet = event["_task_protocol_meta"]["teamharness_coordination"]
+                if packet["kind"] in {"handoff", "task_submitted", "main_task_ready"}:
+                    # A retained control cannot acquire message execution. Let the controller
+                    # retire a settled phase or redeliver active work with a new native ID.
+                    result = recovery.request("POST", "coordination/events/" + packet["id"] + "/phase",
+                        {"action": "retry", "native_event_id": row["event_id"], "process_id": recovery.process})
+                    if result.get("settled") is True or result.get("retry_queued") is True:
+                        reconciled_controls.add(row["event_id"])
+                    continue
             if intent != row["intent"] and not retained_coordination:
                 continue
             if intent == "task_notification" and (not task_id or row.get("work", {}).get("task_id") != task_id):
@@ -1059,6 +1171,7 @@ def run_managed_worker(client, worker, runtime_path, workspace, timeout, own, st
 
     while not stop.is_set():
         try:
+            flush_task_handoffs(worker, own)
             refresh_runtime_config(worker, runtime_path)
             record = yaml.safe_load(runtime_path.read_text())
             configured_own, configured_rooms = runtime_matrix_context(runtime_path, worker, required_env("AGENTTEAMS_MATRIX_DOMAIN"))

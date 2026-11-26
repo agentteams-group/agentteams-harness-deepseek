@@ -124,8 +124,8 @@ export class MatrixInteractions {
     }
   }
 
-  bindProgress(session, runId) {
-    this.progress = new MatrixProgress(this, session, runId)
+  bindProgress(session, runId, taskPhase = false) {
+    this.progress = new MatrixProgress(this, session, runId, taskPhase)
   }
 
   approvals = new Map()

@@ -114,6 +114,53 @@ export async function persistPhaseReceipt(state, agent, sessions, persistence) {
   }
 }
 
+export async function savePendingHandoffs(home, sessionId, cwd, phaseReceiptId, result, confirmed) {
+  if (!result.assignments?.length && !result.notification?.eventId) return
+  const sent = new Set(confirmed.map(({ receiptId }) => JSON.parse(receiptId))
+    .filter(([type]) => type === 'dispatch').map(([, eventId]) => eventId))
+  const outstanding = row => row?.status === 'queued' && /^[0-9a-f]{32}$/.test(row.eventId) && !sent.has(row.eventId)
+  const assignments = (result.assignments || []).filter(outstanding)
+    .map(({ eventId, taskId }) => ({ eventId, taskId, status: 'queued' }))
+  const notice = outstanding(result.notification) ? { eventId: result.notification.eventId, status: 'queued' } : undefined
+  if (!assignments.length && !notice) return
+  if (!/^session-task-[0-9a-f]{32}$/.test(sessionId)) throw new Error('Unexpected submitting session')
+  const { id, mainTaskId, submissionId } = result.task
+  const record = { sessionId, cwd, phaseReceiptId,
+    result: { task: { id, mainTaskId, submissionId }, assignments, notification: notice } }
+  const directory = join(home, 'sessions', '.task-handoffs')
+  const path = join(directory, sessionId + '.json')
+  await mkdir(directory, { recursive: true })
+  await writeFile(path + '.tmp', JSON.stringify(record))
+  await rename(path + '.tmp', path)
+}
+
+export async function appendConfirmedHandoffs(sessions, persistence, id, pending, confirmed) {
+  const stored = await persistence.loadStored(id)
+  const phase = MessageId(matrixEventMessageId('task-phase:' + pending.phaseReceiptId, 1))
+  if (pending.sessionId !== id || stored?.meta.cwd !== pending.cwd ||
+      !stored.events.some(row => row.type === 'user/message' && row.data.id === phase &&
+        row.data.source?.plugin === 'agentteams.task-phase')) throw new Error('Native submission does not match the queued handoff')
+  const messages = confirmed.map(({ receiptId, fact }) => freezeMessage({
+    id: MessageId(matrixEventMessageId('task-handoff:' + receiptId, 1)), role: 'user',
+    source: { kind: 'plugin', plugin: 'agentteams.task-handoff' }, content: [{ type: 'text', text: fact }] }))
+  if (messages.every(message => stored.events.some(row => row.type === 'user/message' &&
+    isDeepStrictEqual(row.data, message)))) return
+  const session = sessions.prepare(id, { seed: stored.events, meta: stored.meta, seedSource: 'persistence' })
+  const leave = sessions.enter(session)
+  try {
+    sessions.announce(session)
+    for (const message of messages) {
+      const existing = session.events.find(row => row.type === 'user/message' && row.data.id === message.id)
+      if (existing && !isDeepStrictEqual(existing.data, message)) throw new Error('Confirmed handoff changed')
+      if (!existing) session.append('user/message', message, { surfaceOp: 'append' })
+    }
+    await sessions.flush(session)
+    const saved = await persistence.loadStored(id)
+    if (!messages.every(message => saved.events.some(row => row.type === 'user/message' &&
+        isDeepStrictEqual(row.data, message)))) throw new Error('Confirmed handoff is not durable')
+  } finally { leave() }
+}
+
 export async function persistRefreshedInputs(state, agent, sessions, persistence) {
   if (!state.pending.length) return
   for (const source of state.pending) {
@@ -158,12 +205,17 @@ export async function installPublicTask(agentCtx, state) {
     ? await state.call({ operation: 'model_context', context: state.context.context }) : undefined
   agentCtx.get('systemPrompt').section({ name: 'teamharness:public-task', order: 21,
     text: () => [`Use ${TASK} for the common Task operations described below.`, skill, state.context.fact,
+      state.context.planning ? '先规划节点。调用 plan 时用中文填写 overview，向任务房间说明任务目标、验收标准、节点分工及交付物。' : '',
       modelContext ? JSON.stringify(modelContext) : '',
       state.context.roster ? '[Registered public team identities]\n' + JSON.stringify(state.context.roster) : '',
       '[Task input references]\n' + JSON.stringify(state.context.sources), ...receipts.values()].filter(Boolean).join('\n\n') })
   const definition = { name: TASK, description: schema.description, parameters: schema.inputSchema,
     output: { schema: { type: 'object' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
     async execute(arguments_, execution) {
+      if (arguments_.action === 'plan' && state.context.planning &&
+          !(typeof arguments_.overview === 'string' && arguments_.overview.trim())) {
+        throw new HarnessError('请填写规划 overview，说明目标、验收标准、分工及交付物。', 'TASK_NO_EFFECT')
+      }
       let response
       try {
         response = await state.call({ operation: 'task', arguments: arguments_, context: state.context }, execution.signal)
@@ -182,6 +234,9 @@ export async function installPublicTask(agentCtx, state) {
       if (response.phaseComplete === true) {
         state.finalReceipt = [...receipts.values()].join('\n\n')
         state.phaseReceiptId = response.receiptId
+        if (arguments_.action === 'submit' && state.context.execution) {
+          state.outgoing = { result: response.result, sent: response.extraReceipts || [] }
+        }
         state.displayText = response.displayText ?? 'NO_REPLY'
         execution.concludeTurn()
       }
@@ -193,6 +248,8 @@ export async function installPublicTask(agentCtx, state) {
   tools.register(definition)
   agentCtx.on('agent/turn-stopping', async ({ agent }) => {
     await persistPhaseReceipt(state, agent, agentCtx.get('sessions'), agentCtx.get('sessionPersistence'))
+    if (state.outgoing) await savePendingHandoffs(process.env.DSH_HOME, agent.session.id, state.context.context.outputDirectory,
+      state.phaseReceiptId, state.outgoing.result, state.outgoing.sent)
   })
   agentCtx.on('agent/pre-step', async (request, next) => {
     const agent = request.agent || agentCtx.agent

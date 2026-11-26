@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -10,7 +10,7 @@ import { SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { SessionStore } from '@deepseek-ai/dsh-session'
 import { JsonlSessionPersistence } from '@deepseek-ai/dsh-session-persistence-jsonl'
 
-const { nativeCall, preparePublicTask, installPublicTask, persistRefreshedInputs, persistDeliveryContext, persistPhaseReceipt } = await import(
+const { nativeCall, preparePublicTask, installPublicTask, persistRefreshedInputs, persistDeliveryContext, persistPhaseReceipt, savePendingHandoffs, appendConfirmedHandoffs } = await import(
   process.env.AGENTTEAMS_PUBLIC_TASK_MODULE ?? new URL('../../plugins/teamharness/adapters/deepseek-harness/public-task.js', import.meta.url).href)
 
 test('assistant control input does not bind a business Task roster or tools', async () => {
@@ -37,6 +37,31 @@ test('verified execution keeps its authenticated actor without binding another H
   })
   assert.equal(state.context.actor, '@own:test')
   assert.deepEqual(state.context.sources, [])
+})
+
+test('verified planning requires an overview before any Task mutation', async () => {
+  const ctx = new Context()
+  await ctx.plugin(SystemPrompt).await()
+  await ctx.plugin(ToolRuntime, { mode: 'native' }).await()
+  const agent = {}
+  const scoped = createScope(ctx, agent)
+  try {
+    let calls = 0
+    const state = { context: { role: 'team_leader', planning: ['main'], sources: [] }, pending: [],
+      call: async request => {
+        if (request.operation === 'schema') return nativeCall(request)
+        calls++
+        return { result: { ok: true }, refreshedInputs: [] }
+      } }
+    await installPublicTask(scoped.ctx, state)
+    await assert.rejects(() => state.nativeExecute({ action: 'plan', mainTaskId: 'main', overview: ' ' },
+      { signal: new AbortController().signal }), /overview/)
+    assert.equal(calls, 0)
+  } finally {
+    await scoped.dispose()
+    await ctx.registry.delete(ToolRuntime)
+    await ctx.registry.delete(SystemPrompt)
+  }
 })
 
 test('native terminal tool and stored receipt retain sent facts with silent presentation', async () => {
@@ -211,6 +236,46 @@ test('delivery context uses native plugin message and only acknowledges durable 
     await ctx.registry.delete(JsonlSessionPersistence)
     await ctx.registry.delete(SessionStore)
     process.env.HOME = home
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('delayed dispatch is recorded once in the closed submitting session without an agent', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-late-handoff-'))
+  const ctx = new Context()
+  const id = 'session-task-' + '1'.repeat(32)
+  const eventId = 'a'.repeat(32)
+  const receiptId = JSON.stringify(['dispatch', eventId, 'matrix:$sent'])
+  try {
+    await ctx.plugin(SessionStore).await()
+    await ctx.plugin(JsonlSessionPersistence, { root: join(root, 'store'), compression: 'none' }).await()
+    const sessions = ctx.get('sessions'), persistence = ctx.get('sessionPersistence')
+    const session = sessions.prepare(id, { meta: { cwd: root } })
+    const leave = sessions.enter(session)
+    sessions.announce(session)
+    const phase = { finalReceipt: '已提交此阶段成果。', phaseReceiptId: 'submission-receipt' }
+    await persistPhaseReceipt(phase, { session }, sessions, persistence)
+    leave()
+    const result = { task: { id: 'child', mainTaskId: 'main', submissionId: 'revision' },
+      notification: { status: 'queued', eventId }, secretSnapshot: 'do not copy' }
+    await savePendingHandoffs(root, id, root, phase.phaseReceiptId, result, [])
+    const pending = JSON.parse(await readFile(join(root, 'sessions', '.task-handoffs', id + '.json'), 'utf8'))
+    assert.equal(pending.result.secretSnapshot, undefined)
+    const confirmed = [{ receiptId, fact: '已通知下游。Matrix 事件 $sent。' }]
+    await appendConfirmedHandoffs(sessions, persistence, id, pending, confirmed)
+    const first = (await persistence.loadStored(id)).events
+    await appendConfirmedHandoffs(sessions, persistence, id, pending, confirmed)
+    const events = (await persistence.loadStored(id)).events
+    const sent = events.filter(row => row.type === 'user/message' && row.data.source.plugin === 'agentteams.task-handoff')
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0].data.content[0].text, confirmed[0].fact)
+    assert.deepEqual(events, first)
+    assert.equal(events.filter(row => row.type === 'user/message').at(-1).seq, sent[0].seq)
+    await assert.rejects(appendConfirmedHandoffs(sessions, persistence, id,
+      { ...pending, phaseReceiptId: 'another-submission' }, confirmed), /submission/)
+  } finally {
+    await ctx.registry.delete(JsonlSessionPersistence)
+    await ctx.registry.delete(SessionStore)
     await rm(root, { recursive: true, force: true })
   }
 })

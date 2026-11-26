@@ -50,6 +50,13 @@ test('native session tool events publish exact IDs, arguments, results and edits
     assert.ok(!JSON.stringify(outer).includes('private-matrix-token'))
   }
   assert.equal(blocks[5].kind, 'quiet')
+  transport.bindProgress(session, 'deepseek:task:two:1', true)
+  session.append('turn/end', {turn: 2, reason: {kind: 'completed'}})
+  await transport.flush()
+  assert.equal(sent.length, 6, 'Task result is its own completion message')
+  session.append('turn/end', {turn: 3, reason: {kind: 'error'}})
+  await transport.flush()
+  assert.equal(sent.at(-1)['org.agentteams.run'].blocks[0].kind, 'failed')
   assert.ok(!session.events.some(event => event.data?.['org.agentteams.run']))
   await ctx.registry.delete(SessionStore)
 })

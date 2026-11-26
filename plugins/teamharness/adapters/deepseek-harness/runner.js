@@ -13,7 +13,7 @@ import { checkpointInput } from './session-receipt.js'
 import { installMatrixInteractions } from './matrix-interactions.js'
 import { runtimeRecord } from './runtime-logging.js'
 import { checkExecution, commitMatrixSource, installExecutionGuard, recoveryCall } from './managed-native.js'
-import { bindNativeTaskHistory, installPublicTask, preparePublicTask } from './public-task.js'
+import { appendConfirmedHandoffs, bindNativeTaskHistory, installPublicTask, preparePublicTask } from './public-task.js'
 import { NativeTrace } from './native-trace.js'
 import { progressRunId } from './matrix-progress.js'
 
@@ -81,6 +81,14 @@ async function run(ctx, config, io) {
   const agents = ctx.get('agents')
   if (defaultModel === undefined || sessions === undefined || agents === undefined) return
 
+  const lateHandoff = process.env.TEAMHARNESS_DSH_CONFIRMED_HANDOFF
+  if (lateHandoff) {
+    const { pending, confirmed } = JSON.parse(lateHandoff)
+    await appendConfirmedHandoffs(sessions, ctx.get('sessionPersistence'), config.sessionId, pending, confirmed)
+    io.exit(0)
+    return
+  }
+
   let interactions
   if (process.env.TEAMHARNESS_MATRIX_ROOM_ID && process.env.TEAMHARNESS_MATRIX_SENDER) {
     interactions = installMatrixInteractions(ctx, {
@@ -104,7 +112,11 @@ async function run(ctx, config, io) {
     frame.team = parse(readFileSync(process.env.TEAMHARNESS_RUNTIME_CONFIG, 'utf8')).team?.name
   }
   if (frame && !frame.meta.teamharness_coordination && identity?.task_id && process.env.TEAMHARNESS_DSH_ATTACH_ONLY !== 'true') {
-    const current = checkExecution(identity).task
+    // The assignment may be visible to recovery before its Matrix notification.
+    // The canonical begin below must precede admission to inference or tools.
+    const current = recoveryCall('current', { identity }).task
+    if (!['assigned', 'in_progress'].includes(current.status) || current.execution.state !== 'active' ||
+        current.execution.runtime !== 'deepseek-harness') throw new Error('Task assignment is no longer active')
     if (current.task_plan_id) frame.meta.teamharness_coordination = { kind: 'task_assigned', task_id: current.task_id,
       main_task_id: current.main_task_id, project_id: current.project_id || '', delivery_id: current.notifyTxn }
   }
@@ -133,7 +145,8 @@ async function run(ctx, config, io) {
     const { agent } = await trace.run(() => openAgent(ctx, sessionId, config.resume, selection, publicTask))
     bindNativeTaskHistory(publicTask, agent.session)
     if (frame?.meta.teamharness_coordination?.kind !== 'assistant_digest') {
-      interactions?.bindProgress(agent.session, progressRunId(identity, process.env.TEAMHARNESS_MATRIX_ROOM_ID, config.eventId))
+      interactions?.bindProgress(agent.session, progressRunId(identity, process.env.TEAMHARNESS_MATRIX_ROOM_ID, config.eventId),
+        Boolean(identity?.task_id || frame?.meta.teamharness_coordination))
     }
     await agent.whenIdle()
     // Reconcile explicitly selected platform permissions on resumed sessions too.

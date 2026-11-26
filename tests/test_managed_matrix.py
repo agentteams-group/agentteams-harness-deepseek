@@ -1,4 +1,5 @@
 import os
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -13,6 +14,32 @@ from task_recovery import RecoveryConflict
 
 
 class ManagedMatrixTest(unittest.TestCase):
+    def test_flush_only_confirmed_handoffs_and_retry_after_storage_failure(self):
+        folder = self.workspace / 'sessions/.task-handoffs'
+        folder.mkdir(parents=True)
+        session = 'session-task-' + 'a' * 32
+        path = folder / (session + '.json')
+        assignment = {'eventId': '1' * 32, 'taskId': 'next', 'status': 'queued'}
+        notice = {'eventId': '2' * 32, 'status': 'queued'}
+        result = {'task': {'id': 'node'}, 'assignments': [assignment], 'notification': notice}
+        path.write_text(json.dumps({'sessionId': session, 'result': result}))
+        confirmed = [{'receiptId': json.dumps(['dispatch', assignment['eventId'], 'matrix:$sent']), 'fact': 'sent'}]
+        with patch.dict(os.environ, {'DSH_HOME': str(self.workspace)}), \
+                patch.object(bridge, 'confirmed_task_handoffs', side_effect=[[], confirmed, confirmed]) as check, \
+                patch.object(bridge.subprocess, 'run') as runner, \
+                patch.object(bridge, 'sync_sessions', side_effect=[OSError('offline'), None]):
+            bridge.flush_task_handoffs('worker', '@worker:test')
+            runner.assert_not_called()
+            bridge.flush_task_handoffs('worker', '@worker:test')
+            self.assertEqual(json.loads(path.read_text())['result'], result)
+            bridge.flush_task_handoffs('worker', '@worker:test')
+            self.assertEqual(check.call_args.args[1], '@worker:test')
+            submitted = json.loads(runner.call_args.kwargs['env']['TEAMHARNESS_DSH_CONFIRMED_HANDOFF'])
+            self.assertEqual(submitted['pending']['result'], result)
+            self.assertEqual(json.loads(path.read_text())['result'], {**result, 'assignments': []})
+            self.assertEqual(runner.call_count, 2)
+            self.assertEqual(runner.call_args.kwargs['env']['TEAMHARNESS_DSH_SESSION_ID'], session)
+
     def setUp(self):
         self.event = {"event_id": "$source", "room_id": "!dm", "input": {
             "sender": "@owner", "type": "m.room.message", "content": {"msgtype": "m.text", "body": "build"}}}
@@ -42,7 +69,7 @@ class ManagedMatrixTest(unittest.TestCase):
     def test_control_in_a_new_joined_task_room_does_not_require_static_room_mapping(self):
         self.event["input"]["content"]["org.agentteams.coordination"] = {}
         packet = {"text": "Review the submitted task", "session_id": "coordination-submission:id",
-                  "meta": {"teamharness_coordination": {"kind": "task_submitted", "task_id": "T"}}}
+                  "meta": {"teamharness_coordination": {"kind": "task_submitted", "id": "a" * 32, "task_id": "T"}}}
         with patch("task_coordination.notification", return_value=packet):
             self.assertEqual(bridge.managed_matrix_event(self.event, {}, "@agent", set(), {})[:2], ("message", None))
         self.event["input"]["content"].pop("org.agentteams.coordination")
@@ -87,6 +114,36 @@ class ManagedMatrixTest(unittest.TestCase):
         self.assertEqual(timeline, [("save", self.identity, "answer"), ("send",)])
         self.sessions.remember.assert_not_called()
 
+    def test_verified_task_controls_do_not_replay_room_or_raw_envelope(self):
+        self.native.update(body="核对最终交付", kind="text",
+            _task_protocol_meta={"teamharness_coordination": {"kind": "main_task_ready"}})
+        native = self.enterContext(patch.object(bridge, "run_dsh", return_value="NO_REPLY"))
+        history = self.enterContext(patch("worker_matrix_raw.raw_room_history", return_value=["another agent"]))
+        self.enterContext(patch.object(bridge, "sync_sessions"))
+        self.recover()
+        self.assertEqual(native.call_args.args[0], "核对最终交付")
+        history.assert_not_called()
+
+    def test_settled_planning_is_completed_quietly_including_delivery_recovery(self):
+        self.native.update(body="规划当前任务", coordination_session="coordination-handoff:main",
+            _task_protocol_meta={"teamharness_coordination": {"kind": "handoff", "id": "a" * 32}})
+        native = self.enterContext(patch.object(bridge, "run_dsh", return_value="NO_REPLY"))
+        self.enterContext(patch.object(bridge, "sync_sessions"))
+        self.matrix.recovery.request.return_value = {"settled": True}
+        self.recover()
+        self.matrix.recovery.request.assert_called_once_with("POST", "coordination/events/" + "a" * 32 + "/phase",
+            {"action": "begin", "native_event_id": "$source", "process_id": "p"})
+        self.matrix.message_complete.assert_called_once_with(self.identity)
+        identity, receipt = self.matrix.message_save_reply.call_args.args
+        self.assertEqual(identity, self.identity)
+        self.assertIn("$source", receipt)
+        self.claim.update(recovery="deliver", saved_result=receipt)
+        self.recover()
+        self.assertEqual(self.matrix.message_complete.call_count, 2)
+        self.matrix.message_cancel.assert_not_called()
+        self.client.send_content.assert_not_called()
+        native.assert_called_once()
+
     def test_room_encrypted_after_upload_blocks_native_file_event(self):
         from matrix_channel import MatrixClient
         native = MatrixClient("http://unused", "unused")
@@ -107,10 +164,10 @@ class ManagedMatrixTest(unittest.TestCase):
     def test_managed_loop_consumes_shared_pending_with_no_new_native_timeline(self):
         self.check_managed_pending("message")
 
-    def test_backfilled_coordination_control_uses_native_message_dispatch(self):
+    def test_backfilled_coordination_control_uses_controller_redelivery(self):
         self.event["input"]["content"]["org.agentteams.coordination"] = {}
         packet = {"text": "Review submission", "session_id": "coordination-submission:id",
-                  "meta": {"teamharness_coordination": {"kind": "task_submitted", "task_id": "T"}}}
+                  "meta": {"teamharness_coordination": {"kind": "task_submitted", "id": "a" * 32, "task_id": "T"}}}
         with patch("task_coordination.notification", return_value=packet):
             self.check_managed_pending("control")
 
@@ -122,7 +179,8 @@ class ManagedMatrixTest(unittest.TestCase):
         rec.discover.side_effect = lambda: order.append("discover") or {"tasks":[]}
         self.client.request.return_value = {"joined_rooms": ["!dm", "!unwatched"]}
         self.matrix.pending.return_value = [{**self.event, "intent":stored_intent}]
-        def receiver(matrix, client, own, classify, observe):
+        def receiver(matrix, client, own, classify, observe, *, event_types):
+            self.assertEqual(event_types, ("m.room.message", "org.agentteams.coordination"))
             def poll(_):
                 if "sync" in order:
                     stop.set()
@@ -130,6 +188,13 @@ class ManagedMatrixTest(unittest.TestCase):
                 self.assertEqual(observe({"rooms": {}}), {"!dm", "!unwatched"})
                 return {"state": {"rooms": {"!dm": {}}, "pending": ["key"]}}, {}
             return Mock(poll=poll)
+        def redeliver(method, route, body):
+            self.assertEqual((method, route), ("POST", "coordination/events/" + "a" * 32 + "/phase"))
+            self.assertEqual(body, {"action": "retry", "native_event_id": "$source", "process_id": "p"})
+            order.append("redelivery")
+            stop.set()
+            return {"retry_queued": True}
+        rec.request.side_effect = redeliver
         def tasks(*args, on_scan, **kwargs):
             order.append("claim")
             on_scan()
@@ -142,7 +207,10 @@ class ManagedMatrixTest(unittest.TestCase):
                 patch.object(bridge, "recover_message", side_effect=lambda *args, **kwargs: order.append("message") or stop.set()):
             bridge.run_managed_worker(self.client, "agent", runtime, self.workspace, 10, "@agent", stop)
         self.matrix.start.assert_called_once()
-        self.assertEqual(order, ["discover", "sync", "claim", "scanned", "runtime.ready", "message"])
+        if stored_intent == "control":
+            self.assertEqual(order, ["discover", "sync", "redelivery", "claim", "scanned", "runtime.ready"])
+        else:
+            self.assertEqual(order, ["discover", "sync", "claim", "scanned", "runtime.ready", "message"])
         self.assertFalse((self.workspace / "matrix-bridge-state.json").exists())
 
     def test_new_authorized_direct_room_is_joined_and_watched(self):
