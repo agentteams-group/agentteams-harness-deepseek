@@ -135,7 +135,7 @@ def source_agent_reply_user_id(event: dict[str, object], agent_user_ids: set[str
     return ""
 
 
-def manager_allowed_senders(runtime_path: Path, matrix_domain: str) -> set[str]:
+def manager_allowed_senders(runtime_path: Path, matrix_domain: str, policy_key="groupAllowExtra") -> set[str]:
     """Resolve the Controller-owned Manager allow-list without a YAML dependency."""
     allowed = {f"@{os.getenv('AGENTTEAMS_ADMIN_USER', 'admin')}:{matrix_domain}"}
     in_policy = False
@@ -148,7 +148,7 @@ def manager_allowed_senders(runtime_path: Path, matrix_domain: str) -> set[str]:
             break
         if not in_policy:
             continue
-        if line.strip() == "groupAllowExtra:":
+        if line.strip() == policy_key + ":":
             in_group = True
             continue
         if in_group:
@@ -157,6 +157,18 @@ def manager_allowed_senders(runtime_path: Path, matrix_domain: str) -> set[str]:
                 break
             allowed.add(value[2:].strip().strip("'\""))
     return allowed
+
+
+def discover_manager_rooms(client, payload, rooms, own, runtime_path, domain):
+    """Apply projected DM/group policy to verified Matrix room membership."""
+    group = manager_allowed_senders(runtime_path, domain)
+    direct = manager_allowed_senders(runtime_path, domain, "dmAllowExtra")
+    transport = {"groupPolicy": "allowlist", "groupAllowFrom": list(group),
+                 "dm": {"policy": "allowlist", "allowFrom": list(direct)}}
+    joined = managed_rooms(client, payload, rooms, own, transport)
+    for room in joined:
+        rooms.setdefault(room, "team")
+    return {"personal": direct, "team": group}, group - direct
 
 
 def reply_mention_user_ids(
@@ -415,7 +427,7 @@ def dsh_error_detail(stderr: str, returncode: int) -> str:
 def run_dsh(
     task: str,
     workspace: Path,
-    timeout_seconds: int,
+    timeout_seconds: int | None,
     *,
     session_id: str,
     resume: bool,
@@ -485,7 +497,14 @@ class MissingNativeSession(RuntimeError):
     """The runner rejected a missing cache before admitting input or tools."""
 
 
+class NativeOutputLimit(RuntimeError):
+    """The native model stopped at its output limit, without a final answer."""
+
+
 def _execute_dsh(task, workspace, timeout_seconds, environment, poll_control, event_id, session_id):
+    from task_coordination import NotificationUnavailable
+    from task_recovery import RecoveryUnavailable
+
     control_directory = tempfile.TemporaryDirectory(prefix="at-dsh-")
     control_path = str(Path(control_directory.name) / "control.sock")
     environment["TEAMHARNESS_DSH_CONTROL_SOCKET"] = control_path
@@ -518,18 +537,23 @@ def _execute_dsh(task, workspace, timeout_seconds, environment, poll_control, ev
         stderr=subprocess.PIPE,
         start_new_session=True,
     )
-    deadline = time.monotonic() + timeout_seconds
+    deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
     try:
         while True:
             try:
                 stdout, stderr = process.communicate(timeout=0.5)
                 break
             except subprocess.TimeoutExpired:
-                if poll_control and poll_control(steer):
-                    raise InterruptedError("Direct conversation stopped")
+                try:
+                    if poll_control and poll_control(steer):
+                        raise InterruptedError("Direct conversation stopped")
+                except (NotificationUnavailable, RecoveryUnavailable):
+                    # A pending receipt lookup is not a stop/reassignment signal.
+                    # The durable cursor/input remains available on the next poll.
+                    trace_event("control.poll.deferred", event_id=event_id, session_id=session_id)
                 if STOP.is_set():
                     raise InterruptedError("Worker is shutting down")
-                if time.monotonic() >= deadline:
+                if deadline is not None and time.monotonic() >= deadline:
                     raise TimeoutError("DeepSeek Harness task timed out")
     finally:
         if process.poll() is None:
@@ -558,6 +582,8 @@ def _execute_dsh(task, workspace, timeout_seconds, environment, poll_control, ev
     answer = stdout.strip()
     if process.returncode == 75:
         raise MissingNativeSession("DSH native session cache is missing")
+    if process.returncode == 76:
+        raise NativeOutputLimit("DeepSeek Harness model reached its output token limit")
     if process.returncode != 0:
         detail = dsh_error_detail(stderr, process.returncode)
         raise RuntimeError(f"DeepSeek Harness task failed: {detail}")
@@ -619,7 +645,7 @@ def task_stopped(recovery, task_id, team, source):
 
 
 def recover_tasks(client, state, worker_name, workspace, timeout_seconds, own_user_id, admitted,
-                  *, source_events=(), recovery=None, snapshot=None, on_scan=None):
+                  *, source_events=(), recovery=None, snapshot=None, on_scan=None, poll_supplements=None):
     from task_recovery import Recovery, RecoveryConflict, enabled
     from worker_matrix_state import WorkerMatrix
     from worker_sessions import WorkerSessions
@@ -637,6 +663,10 @@ def recover_tasks(client, state, worker_name, workspace, timeout_seconds, own_us
             claimed = recovery.claim(snapshot, entry)
         except RecoveryConflict:
             continue
+        from runtime_control import retired_task_runs, retired_run_delivered
+        for ending in retired_task_runs(team, claimed['task'], recovery.process):
+            ending_event = client.send_content(ending['room_id'], ending['content'], ending['transaction'])
+            retired_run_delivered(recovery.process, ending['transaction'], ending_event)
         claims.append((task_id, team, claimed))
     if on_scan:
         on_scan()
@@ -677,7 +707,8 @@ def recover_tasks(client, state, worker_name, workspace, timeout_seconds, own_us
             "room_id": task["room_id"], "sender": source["sender"] if source else own_user_id,
             "source_event_ids": [source["event_id"]] if source else [],
             "protocol_meta": (source or {}).get("_task_protocol_meta") or {"otel_carrier": (source or {}).get("otel_carrier", {})},
-            "poll_control": lambda _steer: task_stopped(recovery, task_id, team, task["execution"]),
+            "poll_control": lambda steer: (task_stopped(recovery, task_id, team, task["execution"])
+                or bool(poll_supplements and poll_supplements(task, team, steer))),
             "source_key": source_key, "attach_only": attach_only, "identity": {"team_id": team, "task_id": task_id,
                 **{field: task["execution"][field] for field in ("generation", "instance_id", "process_id")}}}
         # Keep native file permissions scoped to this assigned Task, matching
@@ -709,6 +740,17 @@ def recover_tasks(client, state, worker_name, workspace, timeout_seconds, own_us
                 answer = run_dsh(text, task_workspace, timeout_seconds, **kwargs)
             sync_sessions(worker_name)
             saved, answer = recovery.prepare_reply(task_id, team, answer)
+        except NativeOutputLimit:
+            # Re-reading the same inputs creates new tool receipt IDs; it is
+            # not evidence of useful progress that can reset this retry budget.
+            point = (team, task_id)
+            retries = getattr(recovery, "_output_limit_retries", None)
+            if retries is None:
+                retries = recovery._output_limit_retries = set()
+            if point not in retries and recovery.release_failed_turn({"task_id": task_id, "team_id": team,
+                    **{field: task["execution"][field] for field in ("generation", "instance_id", "process_id")}}):
+                retries.add(point)
+            raise
         except Exception:
             recovery.interrupted(task_id, team)
             raise
@@ -1060,7 +1102,7 @@ def run_managed_worker(client, worker, runtime_path, workspace, timeout, own, st
     recovery = Recovery(device_delivery=True)
     matrix = WorkerMatrix("deepseek-harness", recovery=recovery)
     sessions = WorkerSessions("deepseek-harness", recovery=recovery)
-    matrix.start()
+    registered = False
     admitted = set()
     rooms, agents, transport = {}, set(), {}
     joined = set()
@@ -1069,6 +1111,8 @@ def run_managed_worker(client, worker, runtime_path, workspace, timeout, own, st
     def observe(payload):
         joined.clear()
         joined.update(managed_rooms(client, payload, rooms, own, transport))
+        from task_coordination import include_task_rooms
+        include_task_rooms(rooms, joined)
         return joined
 
     def classify(room, raw):
@@ -1081,7 +1125,9 @@ def run_managed_worker(client, worker, runtime_path, workspace, timeout, own, st
         sources = []
         for row in matrix.pending(snapshot):
             room = row["room_id"]
-            if room not in joined or snapshot["state"]["rooms"].get(room, {}).get("gaps"):
+            from task_coordination import requires_room_history
+            if (room not in joined or (snapshot["state"]["rooms"].get(room, {}).get("gaps")
+                    and requires_room_history(row, own))):
                 continue
             if row["event_id"] in reconciled_controls:
                 continue
@@ -1157,6 +1203,28 @@ def run_managed_worker(client, worker, runtime_path, workspace, timeout, own, st
                     return True
         return False
 
+    def task_inputs(task, team, steer):
+        from runtime_control import task_supplement, admit_native_supplement, retire_native_supplement
+        snapshot, _ = receiver.poll(0)
+        runtime = yaml.safe_load(runtime_path.read_text())
+        for event in pending_sources(snapshot):
+            if event['intent'] != 'message':
+                continue
+            row = matrix.input(event['source_key'])
+            content = row['input']['content']
+            source = {'room_id': row['room_id'], 'event_id': row['event_id'],
+                'sender': row['input']['sender'], 'body': content.get('body'),
+                'mentions': (content.get('m.mentions') or {}).get('user_ids', []),
+                'answer': content.get('com.agentteams.answer'),
+                'execution_control': content.get('com.agentteams.control')}
+            if not task_supplement(runtime, {**task, 'team_id': team}, source):
+                continue
+            if not admit_native_supplement(matrix, event['source_key']):
+                continue
+            if steer(event) is True:
+                retire_native_supplement(matrix, event['source_key'])
+        return False
+
     reported_ready = False
 
     def ready_after_scan():
@@ -1171,6 +1239,9 @@ def run_managed_worker(client, worker, runtime_path, workspace, timeout, own, st
 
     while not stop.is_set():
         try:
+            if not registered:
+                matrix.start()
+                registered = True
             flush_task_handoffs(worker, own)
             refresh_runtime_config(worker, runtime_path)
             record = yaml.safe_load(runtime_path.read_text())
@@ -1191,13 +1262,13 @@ def run_managed_worker(client, worker, runtime_path, workspace, timeout, own, st
             except (ValueError, OSError, RuntimeError):
                 # Matrix may be temporarily offline. Independently assigned Tasks
                 # still progress, but readiness waits for a real Matrix scan.
-                recover_tasks(client, None, worker, workspace, timeout, own, admitted, recovery=recovery, snapshot=tasks)
+                recover_tasks(client, None, worker, workspace, timeout, own, admitted, recovery=recovery, snapshot=tasks, poll_supplements=task_inputs)
                 raise
             for room, error in failures.items():
                 trace_event("matrix.backfill.failed", room_id=room, error=str(error)[:1024])
             sources = pending_sources(snapshot)
             recover_tasks(client, None, worker, workspace, timeout, own, admitted, recovery=recovery, snapshot=tasks,
-                          on_scan=ready_after_scan, source_events=[e for e in sources if e["intent"]=="task_notification" and not e["native_committed"]])
+                          on_scan=ready_after_scan, poll_supplements=task_inputs, source_events=[e for e in sources if e["intent"]=="task_notification" and not e["native_committed"]])
             for source in sources:
                 if source["intent"] == "message":
                     try:
@@ -1228,25 +1299,29 @@ def main() -> int:
     if not room_types and not enabled():
         raise RuntimeError("runtime.yaml contains no personalRoomId or teamRoomId")
     client = MatrixClient(homeserver, token)
+    timeout_value = os.getenv("AGENTTEAMS_DSH_TASK_TIMEOUT_SECONDS")
+    timeout_seconds = int(timeout_value) if timeout_value else None
     threading.Thread(target=serve_health, name="health", daemon=True).start()
     if enabled():
         return run_managed_worker(client, worker_name, runtime_path, workspace,
-            int(os.getenv("AGENTTEAMS_DSH_TASK_TIMEOUT_SECONDS", "3600")), own_user_id, STOP)
+            timeout_seconds, own_user_id, STOP)
     state_path = runtime_path.parent / "matrix-bridge-state.json"
     state = BridgeState.load(state_path)
+    from agentteams_receipts import Receipts
+    manager_receipts = (Receipts(workspace.parent)
+                        if runtime_section(runtime_path, "member").get("role") == "manager" else None)
     legacy_cursor_path = runtime_path.parent / "matrix-next-batch"
     if state.next_batch is None and legacy_cursor_path.exists():
         state.next_batch = legacy_cursor_path.read_text(encoding="utf-8").strip()
     since = state.next_batch
     admitted_tasks = set()
     recover_tasks(client, state, worker_name, workspace,
-        int(os.getenv("AGENTTEAMS_DSH_TASK_TIMEOUT_SECONDS", "3600")), own_user_id, admitted_tasks)
+        timeout_seconds, own_user_id, admitted_tasks)
 
     # Process this first batch through the normal loop. A missing local cursor
     # must not discard pending Matrix input when changing Harnesses.
     initial = client.sync(since, 0)
 
-    timeout_seconds = int(os.getenv("AGENTTEAMS_DSH_TASK_TIMEOUT_SECONDS", "3600"))
     attachment_max_bytes = int(os.getenv("AGENTTEAMS_MATRIX_ATTACHMENT_MAX_BYTES", str(25 * 1024 * 1024)))
     max_attempts = max(1, int(os.getenv("AGENTTEAMS_MATRIX_EVENT_MAX_ATTEMPTS", "3")))
     retry_base_seconds = max(1, int(os.getenv("AGENTTEAMS_MATRIX_RETRY_BASE_SECONDS", "2")))
@@ -1270,15 +1345,15 @@ def main() -> int:
             initial = None
             allowed_senders = None
             if runtime_section(runtime_path, "member").get("role") == "manager":
-                allowed_senders = manager_allowed_senders(runtime_path, matrix_domain)
-                agent_user_ids = allowed_senders - {f"@{os.getenv('AGENTTEAMS_ADMIN_USER', 'admin')}:{matrix_domain}"}
-                # Manager spans its admin DM and all joined member rooms.
-                room_types.update({room: "team" for room in payload.get("rooms", {}).get("join", {}) if room not in room_types})
+                allowed_senders, agent_user_ids = discover_manager_rooms(
+                    client, payload, room_types, own_user_id, runtime_path, matrix_domain)
             client.fill_timeline_gaps(payload, since, room_types)
             events = matrix_events(payload, room_types, own_user_id, agent_user_ids, allowed_senders)
             recover_tasks(client, state, worker_name, workspace, timeout_seconds, own_user_id, admitted_tasks, source_events=events)
             batch_complete = True
             for event in events:
+                if manager_receipts and manager_receipts.was_completed(event["room_id"], event["event_id"]):
+                    continue
                 if event.get("coordination_session", "").startswith("coordination-task:"):
                     from task_recovery import enabled
                     if enabled():
@@ -1379,6 +1454,9 @@ def main() -> int:
                         **({"progress_only": True} if event.get("coordination_session") else {}),
                     )
                     state.mark_completed(event["event_id"], reply_event_id)
+                    if manager_receipts:
+                        manager_receipts.enqueue(event["room_id"], event["event_id"], "completed")
+                        manager_receipts.flush(client.request)
                     if direct:
                         execution_status(client, event, "completed", reply_event_id)
                     state.save()

@@ -279,3 +279,39 @@ test('delayed dispatch is recorded once in the closed submitting session without
     await rm(root, { recursive: true, force: true })
   }
 })
+
+
+test('ordinary followup keeps the transport room without claiming an execution', async () => {
+  const state = await preparePublicTask({ role: 'worker', meta: {
+    event_id: '$followup', room_id: '!task:test', sender_id: '@leader:test',
+  } }, async request => {
+    assert.equal(request.operation, 'sources')
+    return []
+  })
+  assert.equal(state.context.sourceRoom, '!task:test')
+  assert.equal(state.context.execution, undefined)
+})
+
+test('ordinary task-room followup reads authoritative task context', async () => {
+  const previous = process.env.AGENTTEAMS_CONTROLLER_URL
+  process.env.AGENTTEAMS_CONTROLLER_URL = 'http://controller.test'
+  try {
+    const calls = []
+    const task = { task: { id: 'main', spec: 'latest requirement' }, currentExecution: { id: 'node' } }
+    const state = await preparePublicTask({ role: 'worker', meta: {
+      event_id: '$followup', room_id: '!task:test', sender_id: '@leader:test',
+    } }, async request => {
+      calls.push(request.operation)
+      if (request.operation === 'sources') return []
+      assert.equal(request.operation, 'room_context')
+      assert.equal(request.room, '!task:test')
+      return { context: task, fact: 'Task system context' }
+    })
+    assert.deepEqual(calls, ['sources', 'room_context'])
+    assert.deepEqual(state.context.context, task)
+    assert.equal(state.context.execution, undefined)
+  } finally {
+    if (previous === undefined) delete process.env.AGENTTEAMS_CONTROLLER_URL
+    else process.env.AGENTTEAMS_CONTROLLER_URL = previous
+  }
+})

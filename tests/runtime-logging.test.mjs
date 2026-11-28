@@ -27,3 +27,11 @@ test('native tool failure keeps the error and call identity', () => {
   assert.equal(result.fields.item_id, 'one')
   assert.equal(result.fields.error, 'command exited 127')
 })
+
+test('batched native logs retain the session event time rather than the flush time', () => {
+  const time = 1795786083677
+  for (const type of ['request/header', 'assistant/message', 'tool/call', 'tool/result']) {
+    const record = runtimeRecord({ time, type, data: { name: 'read_file', callId: 'one' } })
+    assert.equal(record.fields.timestamp, '2026-11-27T13:28:03.677Z')
+  }
+})

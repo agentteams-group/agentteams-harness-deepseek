@@ -24,7 +24,7 @@ def matrix_events(
     room_types: dict[str, str],
     own_user_id: str,
     agent_user_ids: set[str] | None = None,
-    allowed_senders: set[str] | None = None,
+    allowed_senders: set[str] | dict[str, set[str]] | None = None,
 ) -> list[dict[str, Any]]:
     """Extract actionable text, image, and file events from watched joined rooms."""
     found: list[dict[str, Any]] = []
@@ -62,7 +62,8 @@ def matrix_events(
                 continue
             if sender == own_user_id:
                 continue
-            if allowed_senders is not None and sender not in allowed_senders:
+            allowed = allowed_senders.get(room_type, set()) if isinstance(allowed_senders, dict) else allowed_senders
+            if allowed is not None and sender not in allowed:
                 continue
             mentions = content.get("m.mentions")
             mentioned_users = mentions.get("user_ids", []) if isinstance(mentions, dict) else []
@@ -92,6 +93,8 @@ def matrix_events(
                 "kind": kind,
                 "otel_carrier": content.get("com.agentteams.trace", {}),
             }
+            if isinstance(mentioned_users, list) and mentioned_users:
+                extracted["mentions"] = [user for user in mentioned_users if isinstance(user, str)]
             if "com.agentteams.control" in content:
                 extracted["execution_control"] = content["com.agentteams.control"]
             if content.get("com.agentteams.auto_source_mention") is True:

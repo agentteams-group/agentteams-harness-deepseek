@@ -1,3 +1,5 @@
+import { isManagedMcpTool } from './mcp-policy.js'
+import { installConfiguredMcp } from './configured-mcp.js'
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { isDeepStrictEqual } from 'node:util'
@@ -6,6 +8,7 @@ import z from '@deepseek-ai/schemastery'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import { freezeMessage, MessageId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import { matrixEventMessageId } from './message-id.js'
 import { executeAttempt } from './turn.js'
 import { openSteering } from './steering.js'
@@ -76,6 +79,9 @@ async function openAgent(ctx, sessionId, resume, selection, publicTask) {
 
 async function run(ctx, config, io) {
   await ctx.get('loader')?.await()
+  const runtimePath = process.env.TEAMHARNESS_RUNTIME_CONFIG
+  const approvalMode = recoveryCall('approval_mode', {})
+  if (runtimePath) await installConfiguredMcp(ctx, parse(readFileSync(runtimePath, 'utf8')))
   const defaultModel = ctx.get('agentDefaultModel')
   const sessions = ctx.get('sessions')
   const agents = ctx.get('agents')
@@ -92,6 +98,7 @@ async function run(ctx, config, io) {
   let interactions
   if (process.env.TEAMHARNESS_MATRIX_ROOM_ID && process.env.TEAMHARNESS_MATRIX_SENDER) {
     interactions = installMatrixInteractions(ctx, {
+      approvalMode,
       url: process.env.AGENTTEAMS_MATRIX_URL,
       token: process.env.AGENTTEAMS_WORKER_MATRIX_TOKEN,
       room: process.env.TEAMHARNESS_MATRIX_ROOM_ID,
@@ -131,7 +138,17 @@ async function run(ctx, config, io) {
   await trace.start()
   try {
     const publicTask = process.env.TEAMHARNESS_DSH_ATTACH_ONLY === 'true' ? undefined : await trace.run(() => preparePublicTask(frame))
-    const generation = publicTask?.context.context?.generation
+    const prepared = publicTask?.context || {}
+    const snapshot = prepared.context?.task || {}
+    const planning = prepared.planning || []
+    const main = prepared.completion || (planning.length === 1 ? planning[0] : undefined)
+    const taskId = prepared.execution || prepared.review?.[0] || main || snapshot.id
+    const mainId = snapshot.mainTaskId || (snapshot.kind === 'main' ? snapshot.id : main)
+    const fields = {}
+    if (taskId) fields['agentteams.task.id'] = taskId
+    if (mainId) fields['agentteams.main_task.id'] = mainId
+    if (Object.keys(fields).length) await trace.request({ operation: 'enrich', id: trace.root, fields })
+    const generation = prepared.context?.generation
     if (Number.isInteger(generation) && generation > 0 && !identity) {
       await trace.request({ operation: 'enrich', id: trace.root, fields: { 'agentteams.execution.generation': generation } })
     }
@@ -153,6 +170,9 @@ async function run(ctx, config, io) {
     if (process.env.DSH_PERMISSION_MODE) {
       ctx.get('permissionPresets').set(agent.session, process.env.DSH_PERMISSION_MODE)
     }
+    // Native "never" rejects requests; automatic mode grants through the
+    // native answerer while retaining the existing sandbox configuration.
+    if (approvalMode) setApprovalPolicy(agent.session, 'ask')
 
     const sourceKey = process.env.TEAMHARNESS_MATRIX_SOURCE_KEY
     if (identity && sourceKey) {
@@ -198,7 +218,8 @@ async function run(ctx, config, io) {
     }
     let receiptCheckpoint = Promise.resolve()
     if (identity) installExecutionGuard(ctx, agent, identity, () => receiptCheckpoint, recoveryCall,
-      execution => Boolean(publicTask?.nativeExecute) && ctx.get('tools').get(execution.name, agent)?.execute === publicTask.nativeExecute)
+      execution => Boolean(publicTask?.nativeExecute) && ctx.get('tools').get(execution.name, agent)?.execute === publicTask.nativeExecute,
+      execution => isManagedMcpTool(ctx.get('tools').get(execution.name, agent)))
     else ctx.on('agent/request', async (_request, next) => { await receiptCheckpoint; return next() })
     ctx.on('session/event', (session, event) => {
       if (session === agent.session && process.env.AGENTTEAMS_LOG_CAPTURED === '1') {
@@ -218,7 +239,9 @@ async function run(ctx, config, io) {
         if (!request.source_key) return
         const source = recoveryCall('matrix.native.get', { event_key: request.source_key }).input
         if (source.room_id !== process.env.TEAMHARNESS_MATRIX_ROOM_ID ||
-            source.input.sender !== process.env.TEAMHARNESS_MATRIX_SENDER ||
+            // Task supplements arrive through the private bridge socket after
+            // Core authorizes their sender; direct controls retain the DM owner.
+            (( !identity || identity.event_key) && source.input.sender !== process.env.TEAMHARNESS_MATRIX_SENDER) ||
             source.event_id !== request.event_id) throw new Error('Steering source changed')
         const native = userMessage(JSON.stringify(source), messageId('agentteams-source-v1:' + request.event_id, 1),
           { kind: 'plugin', plugin: 'agentteams.matrix-source' })
@@ -250,11 +273,16 @@ async function run(ctx, config, io) {
     io.stdout.write((publicTask?.displayText ?? outcome?.text ?? '') + '\n')
     if (outcome?.reason?.kind === 'error') {
       io.stderr.write(`dsh: ${outcome.reason.error.code}: ${outcome.reason.error.message}\n`)
+    } else if (outcome?.reason?.kind !== 'completed') {
+      io.stderr.write(`dsh: native turn ended: ${outcome?.reason?.kind ?? 'missing completion'}\n`)
     }
-    await trace.close(outcome?.reason?.kind === 'error' ? { code: outcome.reason.error.code } : undefined)
-    io.exit(outcome?.reason?.kind === 'completed' ? 0 : 1)
+    await trace.close(outcome?.reason?.kind === 'completed' ? undefined : {
+      code: outcome?.reason?.error?.code ?? outcome?.reason?.kind ?? 'missing_completion',
+    })
+    io.exit(outcome?.reason?.kind === 'completed' ? 0 : outcome?.reason?.kind === 'max-tokens' ? 76 : 1)
   } catch (error) {
     await interactions?.flush()
+    await interactions?.progress?.finish('failed')
     await trace.close(error)
     throw error
   }

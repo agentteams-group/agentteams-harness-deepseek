@@ -103,6 +103,29 @@ class LimitedTimelineTest(unittest.TestCase):
 
 
 class ManagerRoleTest(unittest.TestCase):
+    def test_extra_admin_direct_room_is_not_a_group_or_an_agent(self):
+        from matrix_bridge import discover_manager_rooms
+        from unittest.mock import Mock
+        own, human, leader = '@manager:matrix.local', '@second-admin:matrix.local', '@leader:matrix.local'
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / 'runtime.yaml'
+            path.write_text("desired:\n  channelPolicy:\n    dmAllowExtra:\n    - '@second-admin:matrix.local'\n    groupAllowExtra:\n    - '@leader:matrix.local'\nmember:\n  role: manager\n")
+            client = Mock()
+            client.request.side_effect = lambda method, url: ({'joined_rooms': ['!dm', '!group']}
+                if url.endswith('/joined_rooms') else {'joined': {own: {}, human: {}}}
+                if '!dm' in urllib.parse.unquote(url) else {'joined': {own: {}, human: {}, leader: {}}})
+            rooms = {}
+            with patch.dict('os.environ', {'AGENTTEAMS_ADMIN_USER': 'first-admin'}):
+                allowed, agents = discover_manager_rooms(client, {}, rooms, own, path, 'matrix.local')
+            self.assertEqual(rooms, {'!dm': 'personal', '!group': 'team'})
+            self.assertNotIn(human, agents)
+            raw = {'type': 'm.room.message', 'event_id': '$new', 'sender': human,
+                   'content': {'msgtype': 'm.text', 'body': 'new human request'}}
+            payload = {'rooms': {'join': {'!dm': {'timeline': {'events': [raw]}}}}}
+            self.assertEqual(len(matrix_events(payload, rooms, own, agents, allowed)), 1)
+            payload = {'rooms': {'join': {'!group': {'timeline': {'events': [raw]}}}}}
+            self.assertEqual(matrix_events(payload, rooms, own, agents, allowed), [])
+
     def test_manager_policy_reads_controller_membership(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "runtime.yaml"

@@ -7,14 +7,32 @@
 
 - id: agent-default-model
   config:
-    provider: deepseek-official
+    provider: !!js >-
+      process.env.DSH_MODEL_API === 'openai-responses' ? 'agentteams-gateway' : 'deepseek-official'
     model: !!js process.env.TEAMHARNESS_DSH_MODEL || 'deepseek-v4-flash'
 
 # DSH's native 256k output default exceeds common gateway model limits.
+# Use the existing AgentTeams output budget override for reasoning models.
 # This caps each reply, without reducing the model's input context window.
 - id: llm-deepseek
+  disabled: !!js process.env.DSH_MODEL_API === 'openai-responses'
   config:
-    maxTokens: 16384
+    maxTokens: !!js Number(process.env.AGENTTEAMS_MODEL_MAX_TOKENS || 16384)
+
+- id: llm-pi-ai
+  disabled: !!js process.env.DSH_MODEL_API !== 'openai-responses'
+  config:
+    providers:
+      agentteams-gateway:
+        api: openai-responses
+        baseURL: !!js process.env.DEEPSEEK_BASE_URL
+        apiKeyEnv: DEEPSEEK_API_KEY
+        defaultMaxTokens: !!js Number(process.env.AGENTTEAMS_MODEL_MAX_TOKENS || 16384)
+        models:
+          - id: !!js process.env.TEAMHARNESS_DSH_MODEL
+            # Let pi-ai send strict:false, preserving native optional tool fields.
+            compat:
+              supportsStrictMode: true
 
 - id: headless-runner
   disabled: true

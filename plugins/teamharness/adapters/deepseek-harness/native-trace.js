@@ -12,6 +12,7 @@ export class NativeTrace {
   constructor(options) {
     this.options = options
     this.pending = new Map()
+    this.captureContent = ['true', '1'].includes((process.env.AGENTTEAMS_OTEL_CAPTURE_CONTENT || 'true').toLowerCase())
     this.root = randomUUID()
     this.enabled = ['true', '1'].includes(process.env.AGENTTEAMS_OTEL_ENABLED?.toLowerCase())
   }
@@ -56,15 +57,15 @@ export class NativeTrace {
     })
   }
 
-  async span(kind, name, fields = {}, attributes = {}, eventIds = []) {
+  async span(kind, name, fields = {}, attributes = {}, eventIds = [], input) {
     const id = randomUUID()
     const response = await this.request({ operation: 'start', id, kind, name, parent: this.root,
-      fields, attributes, eventIds, timeNs: now() })
+      fields, attributes, eventIds, ...(this.captureContent ? { input } : {}), timeNs: now() })
     return { id, carrier: response.carrier || {} }
   }
 
-  async end(span, attributes = {}, error) {
-    return this.request({ operation: 'end', id: span.id, attributes,
+  async end(span, attributes = {}, error, output) {
+    return this.request({ operation: 'end', id: span.id, attributes, ...(this.captureContent ? { output } : {}),
       ...(error ? { error: String(error.code || error.name || 'NativeFailure') } : {}), timeNs: now() })
   }
 
@@ -77,13 +78,15 @@ export class NativeTrace {
       const span = await telemetry.span('model', 'chat ' + options.model, {}, {
         'langfuse.observation.type': 'generation', 'gen_ai.operation.name': 'chat',
         'gen_ai.provider.name': options.provider, 'gen_ai.request.model': options.model,
-      }, eventIds)
+      }, eventIds, options.messages)
+      const output = []
       let usage, error, finish, iterator
       try {
         iterator = activeTrace.run(span, () => next()[Symbol.asyncIterator]())
         while (true) {
           const item = await activeTrace.run(span, () => iterator.next())
           if (item.done) break
+          if (telemetry.captureContent) output.push(item.value)
           if (item.value.type === 'usage') usage = item.value.usage
           if (item.value.type === 'finish') finish = item.value.reason
           yield item.value
@@ -100,7 +103,7 @@ export class NativeTrace {
           if (usage.cacheWriteTokens !== undefined) attributes['gen_ai.usage.cache_write.input_tokens'] = usage.cacheWriteTokens
         }
         if (finish?.kind) attributes['gen_ai.response.finish_reasons'] = [finish.kind]
-        await telemetry.end(span, attributes, error || closeError || (finish?.kind === 'error' ? { code: finish.error?.code || 'NativeModelError' } : undefined))
+        await telemetry.end(span, attributes, error || closeError || (finish?.kind === 'error' ? { code: finish.error?.code || 'NativeModelError' } : undefined), { stream: output })
         if (closeError && !error) throw closeError
       }
     })())
@@ -108,14 +111,15 @@ export class NativeTrace {
       const span = await telemetry.span('tool', execution.name, {}, {
         'langfuse.observation.type': 'tool', 'gen_ai.operation.name': 'execute_tool',
         'gen_ai.tool.name': execution.name, 'gen_ai.tool.call.id': execution.callId,
-      })
-      let error
+      }, [], execution.arguments)
+      let error, output
       try {
         const result = await activeTrace.run(span, next)
+        output = result
         if (result.isError) error = { code: result.error?.info?.code || 'NativeToolError' }
         return result
-      } catch (failure) { error = failure; throw failure }
-      finally { await telemetry.end(span, {}, error) }
+      } catch (failure) { error = failure; output = { error: { type: failure.name, message: failure.message } }; throw failure }
+      finally { await telemetry.end(span, {}, error, output) }
     })
   }
 

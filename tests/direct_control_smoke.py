@@ -82,9 +82,16 @@ with tempfile.TemporaryDirectory() as temporary:
         def send_content(self, room, content, tx):
             statuses.append(content['com.agentteams.execution']['status'])
 
+    receipt_failures = []
+
     def poll(steer):
         if not Model.pidfile.exists():
             return False
+        if not receipt_failures:
+            from task_coordination import NotificationUnavailable
+            receipt_failures.append(True)
+            raise NotificationUnavailable("local fixture receipt temporarily unavailable")
+        os.kill(int(Model.pidfile.read_text()), 0)
         stopped = poll_direct_control(Matrix(), 'cursor', active, state,
             '@agent:test', {'!dm:test': 'personal'}, set(), None, steer)
         if action == 'steer' and state.is_completed('$supplement'):
@@ -101,6 +108,7 @@ with tempfile.TemporaryDirectory() as temporary:
         except InterruptedError:
             assert action == 'stop'
         assert statuses == ([] if action == 'steer' else ['stopping']), statuses
+        assert receipt_failures == [True], 'receipt outage was not exercised'
         assert Model.pidfile.exists(), 'native bash never started'
         pid = int(Model.pidfile.read_text())
         try:

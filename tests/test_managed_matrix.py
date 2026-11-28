@@ -171,7 +171,11 @@ class ManagedMatrixTest(unittest.TestCase):
         with patch("task_coordination.notification", return_value=packet):
             self.check_managed_pending("control")
 
-    def check_managed_pending(self, stored_intent):
+    def test_managed_registration_failure_keeps_loop_alive_for_retry(self):
+        self.check_managed_pending("message", registration_failures=1)
+
+    def check_managed_pending(self, stored_intent, registration_failures=0):
+        self.matrix.start.side_effect = [OSError("Controller unavailable")] * registration_failures + [None]
         runtime = self.workspace / "runtime.yaml"
         runtime.write_text("member:\n  matrixUserId: '@agent'\n  personalRoomId: '!dm'\n")
         stop, order = threading.Event(), []
@@ -186,6 +190,7 @@ class ManagedMatrixTest(unittest.TestCase):
                     stop.set()
                 order.append("sync")
                 self.assertEqual(observe({"rooms": {}}), {"!dm", "!unwatched"})
+                self.assertEqual(classify("!unwatched", self.event["input"] | {"event_id": "$followup", "content": {"msgtype": "m.text", "body": "@agent status?", "m.mentions": {"user_ids": ["@agent"]}}}), ("message", None))
                 return {"state": {"rooms": {"!dm": {}}, "pending": ["key"]}}, {}
             return Mock(poll=poll)
         def redeliver(method, route, body):
@@ -199,6 +204,7 @@ class ManagedMatrixTest(unittest.TestCase):
             order.append("claim")
             on_scan()
         with patch.dict(os.environ, {"AGENTTEAMS_MATRIX_DOMAIN":"hs"}), patch("task_recovery.Recovery", return_value=rec), \
+                patch("task_coordination.controller_json", return_value={"taskId": "completed-task", "status": "completed"}), \
                 patch("worker_matrix_state.WorkerMatrix", return_value=self.matrix), patch("worker_matrix_raw.RawWorkerSync", side_effect=receiver), \
                 patch.object(bridge, "refresh_runtime_config"), patch.object(bridge.subprocess, "run"), \
                 patch("worker_handoff.recovery_scanned", side_effect=lambda: order.append("scanned")), \
@@ -206,11 +212,11 @@ class ManagedMatrixTest(unittest.TestCase):
                 patch.object(bridge, "recover_tasks", side_effect=tasks), patch.object(bridge, "direct_member", return_value=False), \
                 patch.object(bridge, "recover_message", side_effect=lambda *args, **kwargs: order.append("message") or stop.set()):
             bridge.run_managed_worker(self.client, "agent", runtime, self.workspace, 10, "@agent", stop)
-        self.matrix.start.assert_called_once()
+        self.assertEqual(self.matrix.start.call_count, 1 + registration_failures)
         if stored_intent == "control":
-            self.assertEqual(order, ["discover", "sync", "redelivery", "claim", "scanned", "runtime.ready"])
+            self.assertEqual(order, ["matrix.failed"] * registration_failures + ["discover", "sync", "redelivery", "claim", "scanned", "runtime.ready"])
         else:
-            self.assertEqual(order, ["discover", "sync", "claim", "scanned", "runtime.ready", "message"])
+            self.assertEqual(order, ["matrix.failed"] * registration_failures + ["discover", "sync", "claim", "scanned", "runtime.ready", "message"])
         self.assertFalse((self.workspace / "matrix-bridge-state.json").exists())
 
     def test_new_authorized_direct_room_is_joined_and_watched(self):
