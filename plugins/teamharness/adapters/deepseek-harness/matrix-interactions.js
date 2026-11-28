@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { MatrixProgress } from './matrix-progress.js'
+export const MCP_APPROVAL_REASON = 'AgentTeams MCP approval policy'
 
 const KEY = 'org.agentteams.approval'
 
@@ -141,6 +142,7 @@ export class MatrixInteractions {
 export function installMatrixInteractions(ctx, options) {
   const transport = new MatrixInteractions(options)
   ctx.on('approval/request', (req, next) => {
+    if (options.approvalMode === 'allow' && req.reason !== MCP_APPROVAL_REASON) return 'allowed-once'
     const events = req.agent.session.events
     const decided = new Set(events.filter(e => e.type === 'approval/decided').map(e => e.data.id))
     const asked = events.filter(e => e.type === 'approval/asked' && !decided.has(e.data.id)

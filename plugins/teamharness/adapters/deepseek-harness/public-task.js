@@ -44,7 +44,7 @@ export function nativeCall(payload, signal) {
 export async function preparePublicTask(frame, call = nativeCall) {
   if (!frame) return undefined
   const event = frame.meta.teamharness_coordination
-  const context = { role: frame.role, sourceEvent: frame.meta.event_id,
+  const context = { role: frame.role, sourceEvent: frame.meta.event_id, sourceRoom: frame.meta.room_id,
     actor: frame.meta.agent_matrix_user_id || '',
     sources: !event && frame.meta.event_id?.startsWith('$')
       ? await call({ operation: 'sources', meta: frame.meta }) : [] }
@@ -64,6 +64,9 @@ export async function preparePublicTask(frame, call = nativeCall) {
     }
     Object.assign(context, prepared)
     if (event.kind === 'assistant_digest') return undefined
+  }
+  if (!event && process.env.AGENTTEAMS_CONTROLLER_URL) {
+    Object.assign(context, await call({ operation: 'room_context', room: frame.meta.room_id }))
   }
   const state = { context, phase, pending: [], call }
   if (['manager', 'leader', 'team_leader'].includes(frame.role)) {

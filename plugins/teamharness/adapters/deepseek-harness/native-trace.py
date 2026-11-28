@@ -31,7 +31,7 @@ def serve(source, output):
                 span = start_turn(fields, None)
                 span.set_attribute("agentteams.telemetry.adapter", "deepseek-native")
                 span.set_attribute("agentteams.telemetry.coverage", "turn,model,tool")
-                span.set_attribute("agentteams.telemetry.capture_content", "false")
+                span.set_attribute("agentteams.telemetry.capture_content", os.getenv("AGENTTEAMS_OTEL_CAPTURE_CONTENT", "true"))
             else:
                 token = telemetry._correlation.set({**fields, **(request.get("fields") or {})})
                 try:
@@ -40,6 +40,7 @@ def serve(source, output):
                         start_time=request["timeNs"], attributes=request.get("attributes") or {})
                 finally:
                     telemetry._correlation.reset(token)
+            telemetry.set_io(span, input=request.get("input"))
             spans[identity] = span
             if request.get("eventIds"):
                 span.set_attribute("agentteams.input.event_ids", request["eventIds"])
@@ -53,11 +54,17 @@ def serve(source, output):
                     telemetry._correlation.reset(token)
         elif operation == "enrich":
             fields.update(request["fields"])
-            for key, value in request["fields"].items():
-                spans[identity].set_attribute(key, value)
+            token = telemetry._correlation.set(fields)
+            try:
+                # Admission resolves planning identity after the root started.
+                # Refresh query metadata and tags as well as native attributes.
+                telemetry.IdentityProcessor().on_start(spans[identity])
+            finally:
+                telemetry._correlation.reset(token)
             result = {}
         elif operation == "end":
             span = spans.pop(identity)
+            telemetry.set_io(span, output=request.get("output"))
             for key, value in (request.get("attributes") or {}).items():
                 span.set_attribute(key, value)
             if request.get("error"):

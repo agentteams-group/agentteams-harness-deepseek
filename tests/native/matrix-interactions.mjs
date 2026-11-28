@@ -8,12 +8,34 @@ const { installMatrixInteractions } = await import(process.env.AGENTTEAMS_INTERA
   ?? new URL('../../plugins/teamharness/adapters/deepseek-harness/matrix-interactions.js', import.meta.url).href)
 process.env.AGENTTEAMS_MATRIX_USER_ID = '@worker'
 
-for (const [action, expected, requester, admin] of [
+test('Agent automatic mode grants through the native answerer without changing the sandbox', async () => {
+  const ctx = new Context()
+  await ctx.plugin(SessionStore).await()
+  await ctx.plugin(ApprovalService, { policy: 'ask' }).await()
+  const { effectiveSandboxMode, setSandboxMode } = await import('@deepseek-ai/dsh-sandbox-policy')
+  const transport = installMatrixInteractions(ctx, {
+    url: 'http://matrix.test', token: 'test', room: '!room', sender: '@owner', approvalMode: 'allow',
+    request: async () => { throw new Error('Automatic approval must not ask Matrix') },
+  })
+  const session = ctx.sessions.create('automatic-mode', { meta: { cwd: '/tmp' } })
+  setSandboxMode(session, 'workspace-write')
+  session.append('turn/start', { turn: 1 })
+  const outcome = await ctx.approval.request({ agent: { session }, toolName: 'bash', reason: 'test gate' })
+  await transport.flush()
+  assert.equal(outcome, 'allowed-once')
+  assert.equal(effectiveSandboxMode(session.events), 'workspace-write')
+  assert.equal(session.events.at(-1).data.outcome, 'allowed-once')
+  await ctx.registry.delete(ApprovalService)
+  await ctx.registry.delete(SessionStore)
+})
+
+for (const [action, expected, requester, admin, approvalMode] of [
   ['approve', 'allowed-once', '@owner', undefined],
   ['deny', 'rejected', '@owner', undefined],
   ['approve', 'allowed-once', '@agent', '@owner'],
+  ['deny', 'rejected', '@owner', undefined, 'allow'],
 ]) {
-  test(`native DSH approval ${action} by ${admin ? 'admin' : 'owner'} gates execution and records the committed receipt`, async () => {
+  test(`native DSH approval ${action} by ${admin ? 'admin' : 'owner'} ${approvalMode ?? 'default'} gates execution and records the committed receipt`, async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore).await()
     await ctx.plugin(ApprovalService, { policy: 'ask' }).await()
@@ -21,7 +43,7 @@ for (const [action, expected, requester, admin] of [
     let pending
     let syncs = 0
     const transport = installMatrixInteractions(ctx, {
-      url: 'http://matrix.test', token: 'test', room: '!room', sender: requester, admin,
+      url: 'http://matrix.test', token: 'test', room: '!room', sender: requester, admin, approvalMode,
       request: async (url, options) => {
         if (options.method === 'PUT') {
           const content = JSON.parse(options.body)
@@ -49,7 +71,7 @@ for (const [action, expected, requester, admin] of [
     })
     const session = ctx.sessions.create('approval-test', { meta: { cwd: '/tmp' } })
     session.append('turn/start', { turn: 1 })
-    const outcome = await ctx.approval.request({ agent: { session }, toolName: 'bash', reason: 'test gate' })
+    const outcome = await ctx.approval.request({ agent: { session }, toolName: 'bash', reason: approvalMode === 'allow' ? 'AgentTeams MCP approval policy' : 'test gate' })
     let executed = false
     if (outcome === 'allowed-once') executed = true
     await transport.flush()

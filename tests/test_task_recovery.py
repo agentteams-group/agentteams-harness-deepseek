@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 sys.path.insert(0, str(Path(os.environ.get("AT_SOURCE", Path(__file__).resolve().parents[2])) / "shared/lib"))
 from task_recovery import Recovery, RecoveryConflict
-from matrix_bridge import BridgeState, MissingNativeSession, recover_tasks
+from matrix_bridge import BridgeState, MissingNativeSession, NativeOutputLimit, recover_tasks
 import matrix_bridge
 
 
@@ -36,7 +36,7 @@ class RecoveryTest(unittest.TestCase):
                 return {"runtime": "deepseek-harness", "etag": "v1", "instance_id": "actual-start"}
             assert path.startswith("runtime/sessions?")
             cp = self.task["execution"]["checkpoint"]
-            return {"instance_id": "actual-start", "runtime": "deepseek-harness", "generation": 2, "checkpoint_version": cp["version"],
+            return {"instance_id": "actual-start", "runtime": "deepseek-harness", "generation": self.task["execution"]["generation"], "checkpoint_version": cp["version"],
                     "checkpoint_digest": Recovery.digest(cp), "config_generation": 1, "cache": self.cache, "compatible": True,
                     "etag": "v1", "work": {"kind": "task", "team_id": "team", "task_id": "stable"}}
         self.recovery.request = request
@@ -175,6 +175,18 @@ class RecoveryTest(unittest.TestCase):
         self.run.assert_called_once()
         self.recovery.interrupted.assert_called_once_with("stable", "team")
         self.client.send_text.assert_not_called()
+
+    def test_output_limit_releases_only_once_even_after_new_read_receipts(self):
+        self.run.side_effect = NativeOutputLimit("native output limit")
+        self.recovery.release_failed_turn.return_value = True
+        for generation in (2, 3):
+            self.task["execution"]["generation"] = generation
+            self.task["execution"]["checkpoint"]["completed_steps"].append(f"read-{generation}")
+            with self.assertRaises(NativeOutputLimit):
+                self.recover()
+        self.assertEqual(self.recovery.release_failed_turn.call_count, 1)
+        self.recovery.prepare_reply.assert_not_called()
+        self.client.send_content.assert_not_called()
 
     def test_execution_conflict_or_reassignment_prevents_model_and_reply(self):
         self.recovery.claim.side_effect = RecoveryConflict("assignment changed")

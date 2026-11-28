@@ -2,6 +2,9 @@
 export function runtimeRecord(event) {
   const data = event.data ?? {}
   const fields = { turn: data.turn, step: data.step }
+  if (typeof event.time === 'number' && Number.isFinite(event.time)) {
+    fields.timestamp = new Date(event.time).toISOString()
+  }
   if (event.type === 'request/header') return { event: 'model.begin', fields }
   if (event.type === 'assistant/message') return { event: 'model.end', fields }
   if (event.type === 'tool/call') {

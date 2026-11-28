@@ -59,6 +59,10 @@ assert source.count(old) == 1, 'Revalidate the DSH tool-call ID compatibility fi
 path.write_text(source.replace(old, 'if (call.id) block.callId = call.id;'))
 PY
 
+# rc.2 turns server-returned isError into an untyped exception, losing its terminal origin.
+COPY scripts/patch-native-mcp.py /opt/agentteams/scripts/patch-native-mcp.py
+RUN python3 /opt/agentteams/scripts/patch-native-mcp.py /opt/agentteams/dsh
+
 COPY --from=teamharness . /opt/agentteams/plugins/teamharness/
 COPY plugins/teamharness/adapters/deepseek-harness/ /opt/agentteams/plugins/teamharness/adapters/deepseek-harness/
 RUN mkdir -p /opt/agentteams/dsh-template /tmp/adapter-pack \
