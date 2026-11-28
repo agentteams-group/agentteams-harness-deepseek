@@ -12,7 +12,7 @@ BUILD_ARGS = --build-context agentteams=$(AT_SOURCE) --build-context shared=$(SH
 .PHONY: test build push smoke
 test:
 	npm install --prefix plugins/teamharness/adapters/deepseek-harness --ignore-scripts --no-package-lock --omit=optional
-	python3 -m pytest tests -q
+	PYTHONPATH="$(AT_SOURCE)/shared/lib:$(AT_SOURCE)/shared/lib/telemetry:$${PYTHONPATH:-}" python3 -m pytest tests -q
 	node --test tests/*.test.mjs
 
 build:
