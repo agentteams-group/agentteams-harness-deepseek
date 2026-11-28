@@ -74,12 +74,13 @@ test('DSH tool dispatch reserves before a real body and keeps ambiguous results 
     assert.equal(failed.error.message, 'Lost upstream response')
     assert.deepEqual(effects, ['reserve:known','body:known','confirm:known','reserve:uncertain','body:uncertain'])
     tools.register(defineContentToolFixture({
-      name:'read', description:'Read-only fixture', parameters:{},
+      name:'read', description:'Unregistered reader fixture', parameters:{},
       async execute() { throw new Error('File not found') },
     }))
     const failedRead = await tools.execute({callId:'read-error',name:'read',arguments:{},signal:new AbortController().signal})
     assert.equal(failedRead.isError, true)
-    assert.deepEqual(effects.slice(-2), ['reserve:read-error','confirm:read-error'])
+    // A tool name alone does not prove this is the installed native reader.
+    assert.deepEqual(effects.slice(-2), ['body:uncertain','reserve:read-error'])
   } finally {
     await ctx.registry.delete(ToolRuntime)
     await ctx.registry.delete(SystemPrompt)
