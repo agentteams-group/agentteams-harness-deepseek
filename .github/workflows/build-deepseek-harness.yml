@@ -61,7 +61,7 @@ jobs:
 
       - name: Unit tests
         run: |
-          python3 -m pip install --break-system-packages -r requirements-test.txt
+          python3 -m pip install --break-system-packages -r requirements-test.txt -r "$AT_SOURCE/shared/lib/telemetry/requirements.txt"
           make test
         env:
           AT_SOURCE: ${{ github.workspace }}/.deps/AgentTeams
